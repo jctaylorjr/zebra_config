@@ -30,3 +30,10 @@ pub async fn query(ip: &str, keys: &[&str]) -> anyhow::Result<serde_json::Value>
     }
     anyhow::bail!("no valid response from {ip}")
 }
+
+pub async fn send(ip: &str, data: &[u8]) -> anyhow::Result<()> {
+    let mut s = timeout(Duration::from_secs(5), TcpStream::connect((ip, 9100))).await??;
+    s.write_all(data).await?;
+    s.shutdown().await?;
+    Ok(())
+}
