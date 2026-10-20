@@ -7,6 +7,7 @@ pub struct Target {
     pub dpi: u32,
     pub max_dots: u32,     // the widest ezpl.print_width it accepts
     pub ip_hostname: bool, // has ip.hostname (Link-OS 7.6 and later)
+    pub tone_zpl: bool,    // has print.tone_zpl, darkness on the 0-30 scale whatever the language
 }
 
 // one setting a profile changes, as listed in the profile manager
@@ -75,8 +76,13 @@ pub fn settings(p: &Profile, target: Option<&Target>) -> Result<Vec<Setting>, St
         );
     }
     if let Some(d) = p.darkness {
-        // the printer reads it back with one decimal, e.g. "25.0"
-        set("Darkness", "print.tone", format!("{d:.1}"));
+        // print.tone follows the printer's language, so a mobile printer set to CPCL reads it on
+        // another scale; print.tone_zpl is always 0 to 30. read back with one decimal, e.g. "25.0"
+        let key = match target {
+            Some(t) if !t.tone_zpl => "print.tone",
+            _ => "print.tone_zpl",
+        };
+        set("Darkness", key, format!("{d:.1}"));
     }
     if let Some(n) = &p.network {
         if n.wired_dhcp {
@@ -96,9 +102,11 @@ pub fn settings(p: &Profile, target: Option<&Target>) -> Result<Vec<Setting>, St
         );
     }
     if let Some(m) = &p.media {
+        // continuous media has no gaps or marks to sense
         let (media_type, sense_mode) = match m.media_type {
-            MediaType::Gap => ("gap/notch", "gap"),
-            MediaType::Mark => ("mark", "bar"),
+            MediaType::Gap => ("gap/notch", Some("gap")),
+            MediaType::Mark => ("mark", Some("bar")),
+            MediaType::Continuous => ("continuous", None),
         };
         let sensor = match m.sensor {
             Sensor::Transmissive => "transmissive",
@@ -112,21 +120,23 @@ pub fn settings(p: &Profile, target: Option<&Target>) -> Result<Vec<Setting>, St
             },
         };
         set("Media type", "ezpl.media_type", media_type.into());
-        set("Sense mode", "media.sense_mode", sense_mode.into());
+        if let Some(sense_mode) = sense_mode {
+            set("Sense mode", "media.sense_mode", sense_mode.into());
+        }
         set("Sensor", "device.sensor_select", sensor.into());
         set("Print width (dots)", "ezpl.print_width", width);
     }
     Ok(out)
 }
 
-// the lines to send for a profile on a printer: its settings, then its extra commands
-pub fn commands(p: &Profile, target: &Target) -> Result<Vec<String>, String> {
-    let mut lines: Vec<String> = settings(p, Some(target))?
+// the lines to send: the settings, then a profile's extra commands
+pub fn commands(settings: &[Setting], extra: &[String]) -> Vec<String> {
+    let mut lines: Vec<String> = settings
         .iter()
         .map(|s| format!(r#"! U1 setvar "{}" "{}""#, s.key, s.value))
         .collect();
-    lines.extend(p.commands.iter().cloned());
-    Ok(lines)
+    lines.extend(extra.iter().cloned());
+    lines
 }
 
 // one label of left-aligned text, scaled so it's the same size at any dpi and fits a 1 inch label
@@ -175,7 +185,12 @@ mod tests {
             dpi,
             max_dots,
             ip_hostname: false,
+            tone_zpl: true,
         }
+    }
+
+    fn lines(p: &Profile, t: &Target) -> Vec<String> {
+        commands(&settings(p, Some(t)).unwrap(), &p.commands)
     }
 
     fn print_width(p: &Profile, t: &Target) -> Result<String, String> {
@@ -224,7 +239,7 @@ mod tests {
             media_type: MediaType::Mark,
             sensor: Sensor::Reflective,
         }));
-        let lines = commands(&p, &target(203, 448)).unwrap();
+        let lines = lines(&p, &target(203, 448));
         assert_eq!(lines[0], r#"! U1 setvar "ezpl.media_type" "mark""#);
         assert_eq!(lines[1], r#"! U1 setvar "media.sense_mode" "bar""#);
         assert_eq!(
@@ -244,7 +259,7 @@ mod tests {
             primary: Interface::Wired,
         });
         p.commands = vec!["~JC".into()];
-        let lines = commands(&p, &target(203, 448)).unwrap();
+        let lines = lines(&p, &target(203, 448));
         // a printer before Link-OS 7.6 doesn't have ip.hostname
         assert_eq!(
             lines,
@@ -252,7 +267,7 @@ mod tests {
                 r#"! U1 setvar "device.friendly_name" "CSCABC123456789""#,
                 r#"! U1 setvar "internal_wired.ip.dhcp.option12" "on""#,
                 r#"! U1 setvar "wlan.ip.dhcp.option12" "on""#,
-                r#"! U1 setvar "print.tone" "25.0""#,
+                r#"! U1 setvar "print.tone_zpl" "25.0""#,
                 r#"! U1 setvar "internal_wired.ip.protocol" "dhcp""#,
                 r#"! U1 setvar "wlan.ip.protocol" "dhcp""#,
                 r#"! U1 setvar "ip.primary_network" "1""#,
@@ -269,7 +284,7 @@ mod tests {
             ip_hostname: true,
             ..target(203, 832)
         };
-        let lines = commands(&p, &newer).unwrap();
+        let lines = lines(&p, &newer);
         assert_eq!(lines[0], r#"! U1 setvar "ip.hostname" "CSCABC123456789""#);
         assert_eq!(
             lines[1],
@@ -302,6 +317,37 @@ mod tests {
         // an unchecked interface isn't touched
         assert_eq!(value("internal_wired.ip.protocol"), None);
         assert_eq!(value("ip.primary_network"), Some("2"));
+    }
+
+    #[test]
+    fn darkness_uses_the_zpl_scale_when_the_printer_has_it() {
+        let mut p = profile(None);
+        p.darkness = Some(20.0);
+        let older = Target {
+            tone_zpl: false,
+            ..target(203, 448)
+        };
+        assert_eq!(lines(&p, &older), [r#"! U1 setvar "print.tone" "20.0""#]);
+        assert_eq!(
+            lines(&p, &target(203, 448)),
+            [r#"! U1 setvar "print.tone_zpl" "20.0""#]
+        );
+    }
+
+    #[test]
+    fn continuous_media_sets_no_sense_mode() {
+        let p = profile(Some(Media {
+            width_in: Some(3),
+            media_type: MediaType::Continuous,
+            sensor: Sensor::Transmissive,
+        }));
+        let keys: Vec<String> = settings(&p, Some(&target(203, 640)))
+            .unwrap()
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
+        assert!(keys.contains(&"ezpl.media_type".into()));
+        assert!(!keys.contains(&"media.sense_mode".into()));
     }
 
     #[test]

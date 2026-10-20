@@ -23,13 +23,13 @@ export type PrinterView = {
 	calError: string;
 	setupError: string;
 	unrecorded: boolean; // opened, but not yet added to the recent printers
+	autoRefresh: boolean | null; // null until changed: on, except for battery printers
 };
 
 // the Printer page, kept while visiting other pages
 export const printerPage = $state({
 	ip: '', // the printer opened last; the sidebar link goes back to it
 	typed: '',
-	autoRefresh: true,
 	printers: [] as Printer[],
 	profiles: [] as Profile[],
 	folders: [] as FolderView[],
@@ -60,7 +60,8 @@ export function viewFor(ip: string): PrinterView {
 		calNote: '',
 		calError: '',
 		setupError: '',
-		unrecorded: true
+		unrecorded: true,
+		autoRefresh: null
 	};
 	return printerPage.views[ip];
 }

@@ -178,6 +178,7 @@ pub async fn health(ip: &str) -> anyhow::Result<Health> {
             "head.latch",
             "sensor.gap.cur",
             "sensor.gap.ppr_out_thold",
+            "zpl.system_status",
         ],
     )
     .await?;
@@ -190,8 +191,15 @@ pub async fn health(ip: &str) -> anyhow::Result<Health> {
     };
     let num = |k: &str| get(k).parse::<u32>().ok();
 
-    let text = ask(ip, b"~HQES", hqes_complete).await?;
-    let a = alerts(&text).ok_or_else(|| anyhow::anyhow!("no error status from {ip}"))?;
+    // the SGD version of ~HQES answers whatever command language the printer is set to, which
+    // matters for mobile printers in line print mode; ~HQES is for printers without it
+    let a = match got["zpl.system_status"].as_str().and_then(system_status) {
+        Some(a) => a,
+        None => {
+            let text = ask(ip, b"~HQES", hqes_complete).await?;
+            alerts(&text).ok_or_else(|| anyhow::anyhow!("no error status from {ip}"))?
+        }
+    };
 
     // paper_supply only notices missing media when the printer tries to feed, but the
     // transmissive sensor sees straight through to the light whichever sensor is selected
@@ -246,6 +254,23 @@ fn parse_hqes(text: &str) -> Option<(u64, u64)> {
     Some((errors, warnings))
 }
 
+// "1,1,00000000,00010000,0,00000000,00000000": the printer status flag, then the error flag
+// and its two groups, then the warning flag and its two groups; the same bits as ~HQES
+pub fn system_status(text: &str) -> Option<Alerts> {
+    let f: Vec<&str> = text.trim().split(',').map(str::trim).collect();
+    let [_, _, eh, el, _, wh, wl] = f[..] else {
+        return None;
+    };
+    let hex = |g: &str| u64::from_str_radix(g, 16).ok();
+    let errors = (hex(eh)? << 32) | hex(el)?;
+    let warnings = (hex(wh)? << 32) | hex(wl)?;
+    Some(Alerts {
+        errors: names(errors & !PAUSED, &ERRORS, "error"),
+        warnings: names(warnings, &WARNINGS, "warning"),
+        paused: errors & PAUSED != 0,
+    })
+}
+
 fn names(bits: u64, known: &[(u64, &str)], kind: &str) -> Vec<String> {
     let mut out: Vec<String> = known
         .iter()
@@ -284,6 +309,8 @@ pub async fn all_settings(ip: &str) -> anyhow::Result<Vec<Setting>> {
 // "device.location :  ";
 // branch names ("ezpl.") and commands ("file.delete") have no value and are left out
 fn parse_allcv(text: &str) -> Vec<Setting> {
+    // a name listed twice keeps its first value, so each name is one row on the Printer page
+    let mut seen = std::collections::HashSet::new();
     text.lines()
         .filter_map(|line| {
             let (key, rest) = line.trim_start().split_once(" :")?;
@@ -298,6 +325,7 @@ fn parse_allcv(text: &str) -> Vec<Setting> {
                 choices,
             })
         })
+        .filter(|s| seen.insert(s.key.clone()))
         .collect()
 }
 
@@ -494,6 +522,18 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_sgd_system_status_like_hqes() {
+        // captured from a ZD410 while paused
+        let paused = system_status("1,1,00000000,00010000,0,00000000,00000000").unwrap();
+        assert!(paused.paused && paused.errors.is_empty() && paused.warnings.is_empty());
+        let out = system_status("1,1,00000000,00000005,1,00000000,00000002").unwrap();
+        assert_eq!(out.errors, ["media out", "head open"]);
+        assert_eq!(out.warnings, ["clean printhead"]);
+        assert!(system_status("?").is_none());
+        assert!(system_status("0,0,00000000").is_none());
+    }
+
+    #[test]
     fn reads_the_full_settings_list() {
         let allcv = "\"ezpl.\r\nezpl.print_width : 406 , Choices: 2-448\r\ndevice.friendly_name : CSCABC123456789\r\nfile.delete\r\nip.mirror.password : * \r\nprint.tone_format : zpl , Choices: zpl\r\ndevice.location :  \r\ndevice.print_out_report, Choices: settings,network\r\n";
         let s = parse_allcv(allcv);
@@ -515,6 +555,8 @@ mod tests {
             ("CSCABC123456789", None)
         );
         assert_eq!(s[2].value, "*");
+        let twice = parse_allcv("a.b : 1\r\na.b : 2\r\n");
+        assert_eq!((twice.len(), twice[0].value.as_str()), (1, "1"));
     }
 
     #[test]

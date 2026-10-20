@@ -22,7 +22,7 @@ export type Network = {
 
 export type Media = {
 	width_in: number | null;
-	media_type: 'gap' | 'mark';
+	media_type: 'gap' | 'mark' | 'continuous';
 	sensor: 'transmissive' | 'reflective';
 };
 

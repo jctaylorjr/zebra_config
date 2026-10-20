@@ -18,6 +18,8 @@ pub enum Check {
     Profile,
     Memory,
     Network,
+    Language,
+    Battery,
     Weblink,
     Clock,
     Wear,
@@ -87,6 +89,18 @@ pub fn catalogue() -> Vec<CheckInfo> {
             Network,
             "Network",
             "Connection type, Wi-Fi signal, network errors and DHCP host name",
+            false,
+        ),
+        c(
+            Language,
+            "Printer language",
+            "Whether the printer is in a ZPL mode; mobile printers often ship in CPCL line print",
+            false,
+        ),
+        c(
+            Battery,
+            "Battery",
+            "A mobile printer's charge, battery health, charge cycles and capacity (power.*)",
             false,
         ),
         c(
@@ -168,6 +182,7 @@ pub enum Fix {
     SetClock { offset_minutes: i32 }, // the printer's time zone, minutes east of UTC
     StopCommDiagnostics,
     ApplySettings { settings: Vec<(String, String)> },
+    UseZpl,
 }
 
 impl Fix {
@@ -184,6 +199,7 @@ impl Fix {
             Fix::SetClock { .. } => "Set the clock from this computer".into(),
             Fix::StopCommDiagnostics => "Turn off diagnostics mode".into(),
             Fix::ApplySettings { settings } => format!("Set the {} settings again", settings.len()),
+            Fix::UseZpl => "Switch to ZPL".into(),
         }
     }
 }
@@ -231,6 +247,7 @@ struct Info {
     serial: String,
     dpi: u32,
     ip_hostname: bool,
+    tone_zpl: bool,
 }
 
 struct Session<'a> {
@@ -389,6 +406,8 @@ pub async fn run(
             Check::Profile => profile(&mut s, ctx, &info).await,
             Check::Memory => memory(&mut s).await,
             Check::Network => network(&mut s).await,
+            Check::Language => language(&mut s).await,
+            Check::Battery => battery(&mut s).await,
             Check::Weblink => weblink(&mut s).await,
             Check::Clock => clock(&mut s, ctx).await,
             Check::Wear => wear(&mut s).await,
@@ -429,6 +448,7 @@ async fn connection(s: &mut Session<'_>, ctx: &Context) -> Option<Info> {
             "appl.link_os_version",
             "head.resolution.in_dpi",
             "ip.hostname",
+            "print.tone_zpl",
         ])
         .await;
     let ms = started.elapsed().as_millis();
@@ -450,6 +470,7 @@ async fn connection(s: &mut Session<'_>, ctx: &Context) -> Option<Info> {
         serial: text(&v, "device.unique_id"),
         dpi: text(&v, "head.resolution.in_dpi").parse().unwrap_or(203),
         ip_hostname: v["ip.hostname"].is_string(),
+        tone_zpl: v["print.tone_zpl"].is_string(),
     };
     let firmware = text(&v, "appl.name");
     let about = format!(
@@ -923,10 +944,22 @@ async fn profile(s: &mut Session<'_>, ctx: &Context, info: &Info) -> anyhow::Res
         dpi: info.dpi,
         max_dots,
         ip_hostname: info.ip_hostname,
+        tone_zpl: info.tone_zpl,
     };
-    let want = setup::settings(p, Some(&target)).map_err(|e| anyhow!(e))?;
-    let keys: Vec<&str> = want.iter().map(|w| w.key.as_str()).collect();
+    let all = setup::settings(p, Some(&target)).map_err(|e| anyhow!(e))?;
+    let keys: Vec<&str> = all.iter().map(|w| w.key.as_str()).collect();
     let got = s.get(&keys).await?;
+    // settings the printer doesn't have, like a mobile printer's wired network, are skipped
+    let (want, skipped): (Vec<setup::Setting>, Vec<setup::Setting>) =
+        all.into_iter().partition(|w| {
+            got[w.key.as_str()]
+                .as_str()
+                .is_some_and(|g| g.trim() != "?")
+        });
+    let also = match skipped.len() {
+        0 => String::new(),
+        n => format!(" {n} it doesn't have were skipped."),
+    };
     let differ: Vec<(String, String, String)> = want
         .iter()
         .filter(|w| {
@@ -941,14 +974,15 @@ async fn profile(s: &mut Session<'_>, ctx: &Context, info: &Info) -> anyhow::Res
             Check::Profile,
             Severity::Ok,
             format!("Matches the {} profile", p.name),
-            format!("All {} of its settings are in place.", want.len()),
+            format!("All {} of its settings are in place.{also}", want.len()),
         );
     } else {
         let detail = differ
             .iter()
             .map(|(k, have, want)| format!("{k}: has {have}, profile sets {want}"))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+            + &also;
         let settings = differ
             .into_iter()
             .map(|(k, _, w)| (k, w))
@@ -1099,6 +1133,139 @@ async fn network(s: &mut Session<'_>) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+async fn language(s: &mut Session<'_>) -> anyhow::Result<()> {
+    let v = s.get(&["device.languages"]).await?;
+    let language = text(&v, "device.languages");
+    if language.is_empty() {
+        s.find(
+            Check::Language,
+            Severity::Info,
+            "This printer doesn't report its language",
+            "",
+        );
+    } else if language.contains("zpl") {
+        s.find(
+            Check::Language,
+            Severity::Ok,
+            format!("Printer language is {language}"),
+            "The ZPL commands this app sends will work.",
+        );
+    } else {
+        s.find(
+            Check::Language,
+            Severity::Warning,
+            format!("The printer is in {language} mode, not ZPL"),
+            "Settings still apply, but calibrating, test labels, factory resets and some status checks use ZPL commands, which this mode doesn't run. Switch only if the apps that print to it use ZPL, since apps written for CPCL would stop printing.",
+        )
+        .fix(Fix::UseZpl);
+    }
+    Ok(())
+}
+
+async fn battery(s: &mut Session<'_>) -> anyhow::Result<()> {
+    let v = s
+        .get(&[
+            "power.percent_full",
+            "power.health",
+            "power.status",
+            "power.voltage",
+            "power.cycle_count",
+            "power.design_capacity",
+            "power.full_charge_capacity",
+            "power.inactivity_timeout",
+        ])
+        .await?;
+    let Some(charge) = leading_number(&text(&v, "power.percent_full")) else {
+        s.find(
+            Check::Battery,
+            Severity::Ok,
+            "No battery to check",
+            "This printer runs on mains power.",
+        );
+        return Ok(());
+    };
+    let health = text(&v, "power.health").to_lowercase();
+    let cycles = leading_number(&text(&v, "power.cycle_count"));
+    let design = leading_number(&text(&v, "power.design_capacity"));
+    let holds = leading_number(&text(&v, "power.full_charge_capacity"));
+    let idle = leading_number(&text(&v, "power.inactivity_timeout")).unwrap_or(0.0);
+
+    let mut facts = vec![format!("{charge:.0}% charged")];
+    if let Some(c) = cycles {
+        facts.push(format!("{c:.0} charge cycles"));
+    }
+    if let (Some(d), Some(h)) = (design, holds)
+        && d > 0.0
+    {
+        facts.push(format!(
+            "holds {h:.0} of {d:.0} mAh ({:.0}%)",
+            h / d * 100.0
+        ));
+    }
+    let mut detail = format!("{}.", capitalise(&facts.join(", ")));
+    if idle > 0.0 {
+        detail += &format!(
+            " It turns itself off after {:.0} minutes idle; refreshing it from the Printer page keeps it awake.",
+            idle / 60.0
+        );
+    }
+
+    let links = s.link(Topic::Battery);
+    match health.as_str() {
+        "poor" => {
+            s.find(
+                Check::Battery,
+                Severity::Error,
+                "The battery is worn out",
+                format!("Its health is poor. Replace it. {detail}"),
+            )
+            .links(links);
+        }
+        "replace" => {
+            s.find(
+                Check::Battery,
+                Severity::Warning,
+                "The battery is due for replacement",
+                format!("Its health says replace. {detail}"),
+            )
+            .links(links);
+        }
+        _ if charge < 20.0 => {
+            s.find(
+                Check::Battery,
+                Severity::Warning,
+                format!("The battery is low ({charge:.0}%)"),
+                format!("Charge it, or swap in a charged battery. {detail}"),
+            )
+            .links(links);
+        }
+        _ => {
+            let state = if health.is_empty() {
+                "fine".to_string()
+            } else {
+                health
+            };
+            s.find(
+                Check::Battery,
+                Severity::Ok,
+                format!("The battery is {state}"),
+                detail,
+            );
+        }
+    }
+    Ok(())
+}
+
+// "91% Full", "2500 mAh", "1200 Seconds" -> the number they start with
+fn leading_number(text: &str) -> Option<f64> {
+    let digits: String = text
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    digits.parse().ok()
 }
 
 async fn weblink(s: &mut Session<'_>) -> anyhow::Result<()> {
@@ -1625,6 +1792,14 @@ pub async fn apply_fix(ip: &str, fix: &Fix) -> Result<String, String> {
             send("~JE".into()).await.map_err(failed)?;
             Ok("Diagnostics mode is off".into())
         }
+        // the language change takes effect after a restart
+        Fix::UseZpl => {
+            set(ip, &[("device.languages", "zpl")]).await?;
+            send("! U1 do \"device.reset\" \"\"\r\n".into())
+                .await
+                .map_err(failed)?;
+            Ok("Switched to ZPL; the printer is restarting".into())
+        }
         Fix::ApplySettings { settings } => {
             let pairs: Vec<(&str, &str)> = settings
                 .iter()
@@ -1807,6 +1982,7 @@ enum Topic {
     SmartCal,
     ManualCal,
     ElementOut,
+    Battery,
     Hostname76,
     Hqes,
 }
@@ -1824,6 +2000,10 @@ impl Topic {
             Topic::ElementOut => zd(
                 "Zebra: Configuring printhead element out detection",
                 "https://support.zebra.com/article/Configuring-Printhead-Element-Out-Detection?language=en_US",
+            ),
+            Topic::Battery => zd(
+                "ZQ610 Plus/ZQ620 Plus/ZQ630 Plus user guide: Using Batteries",
+                "https://docs.zebra.com/us/en/printers/mobile/zq610-620-630-plus-ug/c-zq6x0plus-getting-started/c-zq6x0plus-using-batteries.html",
             ),
             Topic::Hostname76 => zd(
                 "Zebra: network naming changes in Link-OS 7.6",
@@ -1954,10 +2134,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_numbers_power_settings_start_with() {
+        assert_eq!(leading_number("91% Full"), Some(91.0));
+        assert_eq!(leading_number("2500 mAh"), Some(2500.0));
+        assert_eq!(leading_number(" 7.91"), Some(7.91));
+        assert_eq!(leading_number(""), None);
+        assert_eq!(leading_number("NA"), None);
+    }
+
+    #[test]
     fn every_check_but_connection_can_be_picked() {
         let ids: Vec<Check> = catalogue().iter().map(|c| c.id).collect();
         assert!(!ids.contains(&Check::Connection));
-        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.len(), 18);
         assert!(catalogue().iter().filter(|c| c.feeds).all(|c| matches!(
             c.id,
             Check::FeedTest | Check::CalibrationTest | Check::ElementTest | Check::SensorProfile

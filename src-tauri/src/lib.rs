@@ -6,12 +6,18 @@ mod profiles;
 mod recent;
 mod settings;
 mod setup;
+mod tray;
 mod usb;
 mod worker;
 
 use model::{Printer, Profile, Status};
 use serde::Serialize;
-use std::{collections::HashMap, fs, path::Path, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    path::Path,
+    sync::{Mutex, atomic::AtomicBool},
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -24,6 +30,7 @@ pub struct AppState {
     tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     settings: Mutex<settings::Settings>,
     recent: Mutex<Vec<recent::Recent>>,
+    closed_while_busy: AtomicBool, // the window was closed while printers were being configured
 }
 
 #[tauri::command]
@@ -282,10 +289,12 @@ struct Details {
 #[tauri::command]
 async fn printer_details(ip: String, keys: Vec<String>) -> Result<Details, String> {
     let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-    let values = printer::query(&ip, &keys)
-        .await
-        .map_err(|e| e.to_string())?;
-    let h = printer::health(&ip).await.map_err(|e| e.to_string())?;
+    // both at once, since the page asks every few seconds
+    let (values, h) = tokio::join!(printer::query(&ip, &keys), printer::health(&ip));
+    let (values, h) = (
+        values.map_err(|e| e.to_string())?,
+        h.map_err(|e| e.to_string())?,
+    );
     Ok(Details {
         values,
         status: h.status,
@@ -499,6 +508,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .setup(|app| {
             let state = app.state::<AppState>();
@@ -508,8 +518,10 @@ pub fn run() {
             }
             *state.settings.lock().unwrap() = settings::load(app.handle());
             *state.recent.lock().unwrap() = recent::load(app.handle());
+            tray::create(app.handle())?;
             Ok(())
         })
+        .on_window_event(tray::on_window_event)
         .invoke_handler(tauri::generate_handler![
             add_printer,
             list_printers,

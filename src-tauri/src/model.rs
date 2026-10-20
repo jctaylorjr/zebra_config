@@ -68,8 +68,9 @@ pub struct Media {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaType {
-    Gap,  // gap/notch, web sensing
-    Mark, // black mark sensing
+    Gap,        // gap/notch, web sensing
+    Mark,       // black mark sensing
+    Continuous, // receipts, as on mobile printers
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]

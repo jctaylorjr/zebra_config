@@ -29,15 +29,27 @@ The app has three pages, picked from the bar on the left:
 
 The Printer page only polls its printer while the window is focused. Applying profiles and running
 diagnoses happen in the backend, so they carry on whichever page is open and whether or not the
-window has focus.
+window has focus. Closing the window while printers are still being configured keeps the app in the
+notification area until they're done; it then quits, or stays there if any failed.
+
+### Mobile printers (ZQ)
+
+- Settings a printer doesn't have, like the wired network on a mobile printer, are skipped and
+  listed rather than failing the profile.
+- Darkness is set through `print.tone_zpl`, so it's on the 0–30 scale even on a printer set to CPCL.
+- Profiles can use continuous media, for receipts.
+- The Printer page shows the battery (charge, health, cycles, capacity), and doesn't auto-refresh a
+  battery printer unless asked, since polling keeps it from turning itself off when idle.
+- Diagnose checks the battery's health and charge, and whether the printer is in a ZPL mode; many
+  mobile printers ship in CPCL line print, where the ZPL commands this app sends don't run.
 
 ## Installing
 
 Download the latest installer from the repository's
 [Releases](https://github.com/jctaylorjr/zebra_config/releases) page:
 
-- `Zebra Configure_…_x64-setup.exe` installs for the current user, without admin rights.
-- `Zebra Configure_…_x64_en-US.msi` installs for every user of the PC, for IT to deploy.
+- `Zebra.Configure_…_x64-setup.exe` installs for the current user, without admin rights.
+- `Zebra.Configure_…_x64_en-US.msi` installs for every user of the PC, for IT to deploy.
 
 They aren't code-signed yet, so Windows SmartScreen may warn about them: choose More info, then
 Run anyway. Updating keeps profiles, settings and recent printers.

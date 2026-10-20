@@ -24,7 +24,7 @@
 				<tr><th>Printer</th><th>Model</th><th>Serial</th><th>Last opened</th><th></th></tr>
 			</thead>
 			<tbody>
-				{#each recent.list as r (r.address)}
+				{#each recent.list as r}
 					<tr>
 						<td>
 							<a href={hrefFor(r.address)}>{r.hostname ?? r.address}</a>

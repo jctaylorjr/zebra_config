@@ -27,6 +27,7 @@ pub fn update(app: &AppHandle, ip: &str, f: impl FnOnce(&mut Printer)) {
         f(p);
         let _ = app.emit("printer-update", p.clone());
     }
+    crate::tray::update(app);
 }
 
 pub fn set_status(app: &AppHandle, ip: &str, status: Status) {
@@ -92,6 +93,7 @@ async fn apply_once(
             "device.product_name",
             "device.unique_id",
             "ip.hostname",
+            "print.tone_zpl",
         ],
     )
     .await
@@ -110,8 +112,23 @@ async fn apply_once(
         max_dots,
         // settings a printer doesn't have come back as null
         ip_hostname: got["ip.hostname"].is_string(),
+        tone_zpl: got["print.tone_zpl"].is_string(),
     };
-    let extra = setup::commands(p, &target).map_err(ApplyError::Mismatch)?;
+    // printers leave out settings they don't have, e.g. a mobile printer has no wired port, so
+    // those are skipped rather than failing the read-back
+    let wanted = setup::settings(p, Some(&target)).map_err(ApplyError::Mismatch)?;
+    let keys: Vec<&str> = wanted.iter().map(|s| s.key.as_str()).collect();
+    let has = match keys.is_empty() {
+        true => serde_json::Value::Null,
+        false => printer::query(ip, &keys).await.map_err(unreachable)?,
+    };
+    let (kept, skipped): (Vec<setup::Setting>, Vec<setup::Setting>) =
+        wanted.into_iter().partition(|s| {
+            has[s.key.as_str()]
+                .as_str()
+                .is_some_and(|v| v.trim() != "?")
+        });
+    let extra = setup::commands(&kept, &p.commands);
     // the test label, printed if there's media once everything is set
     let label = match &p.media {
         Some(m) => {
@@ -246,6 +263,10 @@ async fn apply_once(
         checked.push(format!("{} on E:", want.join(", ")));
     }
 
+    if !skipped.is_empty() {
+        let keys: Vec<&str> = skipped.iter().map(|s| s.key.as_str()).collect();
+        checked.push(format!("skipped {} it doesn't have", keys.join(", ")));
+    }
     if let Some(label) = label {
         checked.push(calibrate_and_print(ip, &label, &step).await?);
     }

@@ -368,6 +368,7 @@
 						<select bind:value={p.media.media_type}>
 							<option value="gap">Gap/notch</option>
 							<option value="mark">Black mark</option>
+							<option value="continuous">Continuous (receipts)</option>
 						</select>
 					</label>
 					<label class="field inline">

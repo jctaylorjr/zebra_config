@@ -36,8 +36,8 @@ jobs:
 
             Download one of these from **Assets** below:
 
-            - **`Zebra Configure_…_x64-setup.exe`**: installs just for you, with no admin rights needed. Use this one.
-            - **`Zebra Configure_…_x64_en-US.msi`**: installs for everyone on the PC, for IT to deploy.
+            - **`Zebra.Configure_…_x64-setup.exe`**: installs just for you, with no admin rights needed. Use this one.
+            - **`Zebra.Configure_…_x64_en-US.msi`**: installs for everyone on the PC, for IT to deploy.
 
             The installers aren't code-signed yet, so Windows may say "Windows protected your PC". Choose **More info**, then **Run anyway**. If CrowdStrike blocks it, ask IT to allow it.
 

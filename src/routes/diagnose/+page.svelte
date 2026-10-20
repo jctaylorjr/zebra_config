@@ -105,18 +105,21 @@
 		runDiagnosis(ip, profileId);
 	}
 
-	const risky = ['restart', 'clear_error'];
+	// these restart the printer, so they ask first
+	const risky = ['restart', 'clear_error', 'use_zpl'];
 
 	async function fix(i: number, ask = true) {
 		const f = d?.findings?.[i];
 		if (!f?.fix) return;
 		if (ask && risky.includes(f.fix.kind)) {
-			const ok = await confirm(
-				f.fix.kind === 'restart'
-					? 'Restart the printer? It takes about a minute to come back.'
-					: 'This cancels all jobs and restarts the printer to clear the error, then pauses it.',
-				{ title: f.fix_label ?? 'Fix' }
-			);
+			const ask: Record<string, string> = {
+				restart: 'Restart the printer? It takes about a minute to come back.',
+				clear_error:
+					'This cancels all jobs and restarts the printer to clear the error, then pauses it.',
+				use_zpl:
+					'Switch the printer to ZPL and restart it? Apps that print to it in CPCL or line print will stop working until it’s switched back.'
+			};
+			const ok = await confirm(ask[f.fix.kind], { title: f.fix_label ?? 'Fix' });
 			if (!ok) return;
 		}
 		await applyFix(ip, i);

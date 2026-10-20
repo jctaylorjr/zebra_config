@@ -43,6 +43,7 @@
 				['Link-OS', 'appl.link_os_version'],
 				['Hostname (7.6 and later)', 'ip.hostname'],
 				['Friendly name', 'device.friendly_name'],
+				['Command language', 'device.languages'],
 				['Up for', 'device.uptime']
 			]
 		},
@@ -69,9 +70,23 @@
 				['Print width (dots)', 'ezpl.print_width'],
 				['Label length (dots)', 'zpl.label_length'],
 				['Resolution (dpi)', 'head.resolution.in_dpi'],
-				['Darkness', 'print.tone'],
+				['Darkness', 'print.tone_zpl'],
 				['Speed (in/s)', 'media.speed'],
 				['Print mode', 'media.printmode']
+			]
+		},
+		{
+			title: 'Battery',
+			rows: [
+				['Charge', 'power.percent_full'],
+				['Health', 'power.health'],
+				['Status', 'power.status'],
+				['Voltage', 'power.voltage'],
+				['Charge cycles', 'power.cycle_count'],
+				['Holds', 'power.full_charge_capacity'],
+				['Rated for', 'power.design_capacity'],
+				['Made', 'power.manufacture_date'],
+				['Turns off when idle after', 'power.inactivity_timeout']
 			]
 		},
 		{
@@ -85,12 +100,15 @@
 			]
 		}
 	];
-	const keys = groups.flatMap((g) => g.rows.map((r) => r[1]));
+	// print.tone too, for printers without print.tone_zpl
+	const keys = [...groups.flatMap((g) => g.rows.map((r) => r[1])), 'print.tone'];
 
 	// the odometer reports distances in centimetres
 	const distances = ['odometer.headclean', 'odometer.headnew', 'odometer.total_print_length'];
 
 	const show = (key: string, val: unknown) => {
+		if (key === 'print.tone_zpl' && (val === null || val === undefined))
+			val = v?.details?.values['print.tone'];
 		if (val === null || val === undefined)
 			return key === 'ip.hostname' ? 'not on this firmware' : '—';
 		const s = String(val);
@@ -100,6 +118,10 @@
 		}
 		if (key === 'ip.primary_network') return s === '1' ? 'Wired' : s === '2' ? 'Wireless' : s;
 		if (key === 'wlan.signal_strength' && /^\d+$/.test(s)) return `${s}%`;
+		if (key === 'power.inactivity_timeout' && /^\d+/.test(s)) {
+			const secs = parseInt(s, 10);
+			return secs === 0 ? 'never' : `${Math.round(secs / 60)} min`;
+		}
 		return s || '—';
 	};
 
@@ -191,10 +213,15 @@
 		});
 	});
 
+	// a battery printer turns itself off when idle, unless something keeps polling it, so
+	// refreshing it is off until switched on
+	let battery = $derived(v?.details?.values['power.percent_full'] != null);
+	let polling = $derived(v ? (v.autoRefresh ?? !battery) : false);
+
 	// polls only while the window is focused and showing, and catches up when it's back
 	let paused = false;
 	$effect(() => {
-		if (!ip || !printerPage.autoRefresh) return;
+		if (!ip || !polling) return;
 		if (!focus.active) {
 			paused = true;
 			return;
@@ -363,6 +390,14 @@
 			list.push({ level: 'error', text: 'head open' });
 		if (d.head_closed && !d.media && !d.errors.includes('media out'))
 			list.push({ level: 'warn', text: 'no media detected' });
+		const health = String(d.values['power.health'] ?? '').toLowerCase();
+		if (health === 'poor') list.push({ level: 'error', text: 'battery worn out: replace it' });
+		if (health === 'replace') list.push({ level: 'warn', text: 'battery due for replacement' });
+		const charge = parseInt(String(d.values['power.percent_full'] ?? ''), 10);
+		if (charge < 20) list.push({ level: 'warn', text: `battery low (${charge}%)` });
+		const language = String(d.values['device.languages'] ?? '');
+		if (language && !language.includes('zpl'))
+			list.push({ level: 'warn', text: `in ${language} mode, so ZPL commands won't run` });
 		return list;
 	});
 
@@ -457,9 +492,18 @@
 			>
 		{/if}
 		<button onclick={() => refresh(ip)}>Refresh</button>
-		<label><input type="checkbox" bind:checked={printerPage.autoRefresh} /> Refresh every 5 s</label>
-		{#if printerPage.autoRefresh && !focus.active}
+		<label>
+			<input
+				type="checkbox"
+				checked={polling}
+				onchange={(e) => v && (v.autoRefresh = e.currentTarget.checked)}
+			/>
+			Refresh every 5 s
+		</label>
+		{#if polling && !focus.active}
 			<span class="muted">Paused while the window isn't focused</span>
+		{:else if battery && !polling}
+			<span class="muted">Off for battery printers, so they can still turn off when idle</span>
 		{/if}
 		{#if v.updated}<span class="muted">Updated {v.updated}</span>{/if}
 		{#if v.detailsError}<span class="error">{v.detailsError}</span>{/if}
@@ -539,7 +583,7 @@
 			</div>
 		</section>
 
-		{#each groups as g}
+		{#each groups.filter((g) => g.title !== 'Battery' || battery) as g}
 			<section class="card">
 				<div class="card-head">
 					<h2>{g.title}</h2>
