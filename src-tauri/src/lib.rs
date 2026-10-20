@@ -1,8 +1,9 @@
-mod media;
+mod actions;
 mod model;
 mod printer;
 mod profiles;
 mod settings;
+mod setup;
 mod usb;
 mod worker;
 
@@ -14,7 +15,8 @@ use tauri::{AppHandle, Manager, State};
 #[derive(Default)]
 pub struct AppState {
     printers: Mutex<HashMap<String, Printer>>,
-    profiles: Mutex<Vec<Profile>>, // in profiles.json order
+    profiles: Mutex<Vec<Profile>>,         // in profiles.json order
+    profiles_error: Mutex<Option<String>>, // why profiles.json couldn't be read; saving is blocked
     tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     settings: Mutex<settings::Settings>,
 }
@@ -60,9 +62,46 @@ fn list_printers(state: State<'_, AppState>) -> Vec<Printer> {
     printers
 }
 
+#[derive(Serialize)]
+struct ProfileList {
+    profiles: Vec<Profile>,
+    error: Option<String>,
+}
+
 #[tauri::command]
-fn list_profiles(state: State<'_, AppState>) -> Vec<Profile> {
-    state.profiles.lock().unwrap().clone()
+fn list_profiles(state: State<'_, AppState>) -> ProfileList {
+    ProfileList {
+        profiles: state.profiles.lock().unwrap().clone(),
+        error: state.profiles_error.lock().unwrap().clone(),
+    }
+}
+
+#[tauri::command]
+fn save_profiles(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profiles: Vec<Profile>,
+) -> Result<Vec<Profile>, String> {
+    if let Some(e) = state.profiles_error.lock().unwrap().as_ref() {
+        return Err(format!(
+            "{e}. Saving would replace it, so fix or remove the file and restart the app"
+        ));
+    }
+    profiles::validate(&profiles)?;
+    profiles::save(&app, &profiles).map_err(|e| e.to_string())?;
+    *state.profiles.lock().unwrap() = profiles.clone();
+    Ok(profiles)
+}
+
+// what a profile changes, with the parts that depend on a printer described
+#[tauri::command]
+fn preview_profile(profile: Profile) -> Result<Vec<setup::Setting>, String> {
+    setup::settings(&profile, None)
+}
+
+#[tauri::command]
+fn profile_template() -> Profile {
+    profiles::template()
 }
 
 #[derive(Serialize)]
@@ -120,6 +159,7 @@ fn apply_profile(
     state: State<'_, AppState>,
     ip: String,
     profile_id: String,
+    use_folder: bool,
 ) -> Result<(), String> {
     let profile = state
         .profiles
@@ -141,12 +181,10 @@ fn apply_profile(
         }
         p.profile_id = Some(profile_id);
         // folders hold firmware, so each model family only ever gets its own
-        state
-            .settings
-            .lock()
-            .unwrap()
-            .folder_for(p.model.as_deref())
-            .cloned()
+        let settings = state.settings.lock().unwrap();
+        use_folder
+            .then(|| settings.folder_for(p.model.as_deref()).cloned())
+            .flatten()
     };
     // re-applying cancels whatever is already running for this printer, before starting over
     let mut tasks = state.tasks.lock().unwrap();
@@ -159,21 +197,80 @@ fn apply_profile(
     Ok(())
 }
 
+// everything the printer page shows above the full settings list
+#[derive(Serialize)]
+struct Details {
+    values: serde_json::Value, // the asked-for settings; ones the printer doesn't have are null
+    status: String,
+    media: bool,
+    head_closed: bool,
+    paused: bool,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[tauri::command]
+async fn printer_details(ip: String, keys: Vec<String>) -> Result<Details, String> {
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let values = printer::query(&ip, &keys)
+        .await
+        .map_err(|e| e.to_string())?;
+    let h = printer::health(&ip).await.map_err(|e| e.to_string())?;
+    Ok(Details {
+        values,
+        status: h.status,
+        media: h.media,
+        head_closed: h.head_closed,
+        paused: h.paused,
+        errors: h.errors,
+        warnings: h.warnings,
+    })
+}
+
+#[tauri::command]
+async fn printer_settings(ip: String) -> Result<Vec<printer::Setting>, String> {
+    printer::all_settings(&ip).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn printer_action(ip: String, action: actions::Action) -> Result<String, String> {
+    actions::run(&ip, action).await
+}
+
+// sends whatever was typed, ending the line the way the printer expects
+#[tauri::command]
+async fn printer_raw(ip: String, command: String) -> Result<String, String> {
+    let line = format!("{}\r\n", command.trim_end());
+    printer::raw(&ip, line.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
-            let loaded = profiles::load(app.handle());
-            *app.state::<AppState>().profiles.lock().unwrap() = loaded;
-            *app.state::<AppState>().settings.lock().unwrap() = settings::load(app.handle());
+            let state = app.state::<AppState>();
+            match profiles::load(app.handle()) {
+                Ok(loaded) => *state.profiles.lock().unwrap() = loaded,
+                Err(e) => *state.profiles_error.lock().unwrap() = Some(e),
+            }
+            *state.settings.lock().unwrap() = settings::load(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             add_printer,
             list_printers,
             list_profiles,
+            save_profiles,
+            preview_profile,
+            profile_template,
+            printer_details,
+            printer_settings,
+            printer_action,
+            printer_raw,
             list_folders,
             save_folders,
             apply_profile

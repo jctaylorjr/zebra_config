@@ -31,9 +31,30 @@ pub struct Profile {
     pub name: String,
     pub models: Vec<String>, // substrings matched against the printer's model, e.g. "ZD411"; empty = any
     #[serde(default)]
+    pub hostname: Option<String>, // e.g. "CSC{serial}"; also sent to DHCP as the host name
+    #[serde(default)]
+    pub darkness: Option<f64>, // 0 to 30
+    #[serde(default)]
+    pub network: Option<Network>,
+    #[serde(default)]
     pub media: Option<Media>,
     #[serde(default)]
     pub commands: Vec<String>, // extra SGD/ZPL lines to send last
+}
+
+// an unchecked interface is left as it is, not switched off DHCP
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Network {
+    pub wired_dhcp: bool,
+    pub wireless_dhcp: bool,
+    pub primary: Interface, // used when both are connected
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum Interface {
+    Wired,
+    Wireless,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

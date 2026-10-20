@@ -1,15 +1,23 @@
 use crate::{
-    AppState, media,
+    AppState,
     model::{Printer, Profile, Status},
-    printer, settings, usb,
+    printer, settings, setup, usb,
 };
 use std::{collections::HashMap, path::Path, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 
-enum ApplyError {
+pub enum ApplyError {
     Unreachable(String), // retry
     Mismatch(String),    // printer answered but didn't take the setting: don't retry
     Unverified(String), // printer stopped answering partway through, e.g. it joined another network: don't retry
+}
+
+impl ApplyError {
+    pub fn into_message(self) -> String {
+        match self {
+            ApplyError::Unreachable(m) | ApplyError::Mismatch(m) | ApplyError::Unverified(m) => m,
+        }
+    }
 }
 
 // change a printer and send the whole row to the GUI
@@ -76,36 +84,48 @@ async fn apply_once(
         None => usb::Folder::default(),
     };
 
-    // worked out first, so media that doesn't fit stops before anything is sent
-    let mut extra = vec![];
-    let mut label = None; // the test label, printed if there's media once everything is set
-    if let Some(m) = &p.media {
-        let got = printer::query(
-            ip,
-            &[
-                "head.resolution.in_dpi",
-                "device.product_name",
-                "device.unique_id",
-            ],
-        )
-        .await
-        .map_err(unreachable)?;
-        let get = |k: &str| got[k].as_str().unwrap_or("").trim().to_string();
-        let dpi = get("head.resolution.in_dpi")
-            .parse()
-            .map_err(|_| ApplyError::Mismatch("printer didn't report its dpi".into()))?;
-        let max = printer::print_width_max(ip).await.map_err(unreachable)?;
-        let width = media::width(m, dpi, max).map_err(ApplyError::Mismatch)?;
-        extra = media::commands(m, dpi, max).map_err(ApplyError::Mismatch)?;
-        let lines = [
-            p.name.clone(),
-            format!("{} {}", get("device.product_name"), get("device.unique_id")),
-            format!("{width} dots at {dpi} dpi"),
-            "zebra_config test print".into(),
-        ];
-        label = Some(media::test_label(&lines, dpi));
-    }
-    extra.extend(p.commands.iter().cloned());
+    // worked out first, so a profile that doesn't fit the printer stops before anything is sent
+    let got = printer::query(
+        ip,
+        &[
+            "head.resolution.in_dpi",
+            "device.product_name",
+            "device.unique_id",
+            "ip.hostname",
+        ],
+    )
+    .await
+    .map_err(unreachable)?;
+    let get = |k: &str| got[k].as_str().unwrap_or("").trim().to_string();
+    let dpi = get("head.resolution.in_dpi")
+        .parse()
+        .map_err(|_| ApplyError::Mismatch("printer didn't report its dpi".into()))?;
+    let max_dots = match &p.media {
+        Some(_) => printer::print_width_max(ip).await.map_err(unreachable)?,
+        None => 0,
+    };
+    let target = setup::Target {
+        serial: get("device.unique_id"),
+        dpi,
+        max_dots,
+        // settings a printer doesn't have come back as null
+        ip_hostname: got["ip.hostname"].is_string(),
+    };
+    let extra = setup::commands(p, &target).map_err(ApplyError::Mismatch)?;
+    // the test label, printed if there's media once everything is set
+    let label = match &p.media {
+        Some(m) => {
+            let width = setup::width(m, dpi, max_dots).map_err(ApplyError::Mismatch)?;
+            let lines = [
+                p.name.clone(),
+                format!("{} {}", get("device.product_name"), target.serial),
+                format!("{width} dots at {dpi} dpi"),
+                "zebra_config test print".into(),
+            ];
+            Some(setup::test_label(&lines, dpi))
+        }
+        None => None,
+    };
 
     let mut checked = vec![];
     if let Some(firmware) = &usb.firmware {
@@ -186,7 +206,7 @@ async fn apply_once(
             .filter(|(k, v)| {
                 !got.get(k)
                     .and_then(|x| x.as_str())
-                    .is_some_and(|x| x.trim().eq_ignore_ascii_case(v))
+                    .is_some_and(|x| same_value(x, v))
             })
             .map(|(k, _)| k.as_str())
             .collect();
@@ -251,7 +271,8 @@ async fn calibrate_and_print(
     if !h.head_closed {
         return Ok("head open, so no calibration or test print".into());
     }
-    if let Some(e) = h.errors {
+    if !h.errors.is_empty() {
+        let e = h.errors.join(", ");
         recover(ip, step).await?;
         return Ok(format!(
             "cleared a printer error ({e}) and paused it; no calibration or test print"
@@ -267,7 +288,7 @@ async fn calibrate_and_print(
             .map_err(stopped)?;
         tokio::time::sleep(Duration::from_secs(2)).await;
         h = printer::health(ip).await.map_err(stopped)?;
-        if h.errors.is_some() || h.paused {
+        if !h.errors.is_empty() || h.paused {
             recover(ip, step).await?;
             return Ok(
                 "printer found no media when unpaused, so no calibration or test print".into(),
@@ -286,8 +307,11 @@ async fn calibrate_and_print(
                 break;
             }
         }
-        if h.errors.is_some() || h.paused || h.status != "ready" {
-            let problem = h.errors.map_or(h.status, |e| format!("an error ({e})"));
+        if !h.errors.is_empty() || h.paused || h.status != "ready" {
+            let problem = match h.errors.is_empty() {
+                true => h.status,
+                false => format!("an error ({})", h.errors.join(", ")),
+            };
             recover(ip, step).await?;
             return Err(ApplyError::Mismatch(format!(
                 "{what} stopped with {problem}; cleared and paused the printer"
@@ -299,7 +323,7 @@ async fn calibrate_and_print(
 
 // leave the printer as if its head had been opened and closed: nothing queued, no error, paused.
 // a reset is the only thing that clears a paper out without opening the head
-async fn recover(ip: &str, step: &(dyn Fn(&str) + Sync)) -> Result<(), ApplyError> {
+pub async fn recover(ip: &str, step: &(dyn Fn(&str) + Sync)) -> Result<(), ApplyError> {
     let stopped =
         |e: anyhow::Error| ApplyError::Unverified(format!("printer stopped answering: {e}"));
     step("Clearing printer error");
@@ -360,6 +384,13 @@ fn expected_settings(text: &str) -> Vec<(String, String)> {
     expected
 }
 
+// what the printer reads back can differ in case or format, e.g. "25.0" for "25"
+fn same_value(got: &str, want: &str) -> bool {
+    let got = got.trim();
+    got.eq_ignore_ascii_case(want)
+        || matches!((got.parse::<f64>(), want.parse::<f64>()), (Ok(a), Ok(b)) if a == b)
+}
+
 // ! U1 setvar "key" "value"  ->  ("key", "value")
 fn parse_setvar(line: &str) -> Option<(String, String)> {
     if !line.contains("setvar") {
@@ -401,6 +432,15 @@ mod tests {
     }
 
     #[test]
+    fn read_back_values_compare_loosely() {
+        assert!(same_value("25.0", "25"));
+        assert!(same_value(" gap/notch ", "gap/notch"));
+        assert!(same_value("ON", "on"));
+        assert!(!same_value("24.5", "25"));
+        assert!(!same_value("auto_detect", "gap/notch"));
+    }
+
+    #[test]
     fn spots_command_files_that_reset_the_printer() {
         assert!(resets_printer(
             b"{}{\"file.cert.weblink1.ca_file\":\"CA.cer\"}{}{\"device.reset\" : \"\"}"
@@ -435,17 +475,16 @@ mod tests {
                 id: "test".into(),
                 name: "test".into(),
                 models: vec![],
+                hostname: None,
+                darkness: None,
+                network: None,
                 media: None,
                 commands: vec![],
             });
         let report = |s: Status| println!("{}", serde_json::to_string(&s).unwrap());
         match apply_once(&ip, &p, folder.as_ref(), &report).await {
             Ok(checked) => println!("applied: {checked}"),
-            Err(
-                ApplyError::Unreachable(e) | ApplyError::Mismatch(e) | ApplyError::Unverified(e),
-            ) => {
-                panic!("{e}")
-            }
+            Err(e) => panic!("{}", e.into_message()),
         }
     }
 }

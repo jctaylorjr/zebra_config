@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "zebra_configure",
-        "width": 800,
-        "height": 600
+        "title": "Zebra Configure",
+        "width": 1180,
+        "height": 760
       }
     ],
     "security": {

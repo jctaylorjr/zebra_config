@@ -121,11 +121,29 @@ pub struct Health {
     pub media: bool,
     pub head_closed: bool,
     pub paused: bool,
-    pub errors: Option<String>, // ~HQES error flags other than pause, when any are set
+    pub errors: Vec<String>,   // besides pause, e.g. "media out"
+    pub warnings: Vec<String>, // e.g. "clean printhead"
 }
 
 const PAUSED: u64 = 0x10000; // ~HQES lists pause as an error
-const MEDIA_OUT: u64 = 0x1;
+
+// ~HQES bits, from the ZPL manual
+const ERRORS: [(u64, &str); 8] = [
+    (0x1, "media out"),
+    (0x2, "ribbon out"),
+    (0x4, "head open"),
+    (0x8, "cutter fault"),
+    (0x10, "printhead over temperature"),
+    (0x20, "motor over temperature"),
+    (0x40, "bad printhead element"),
+    (0x80, "printhead detection error"),
+];
+const WARNINGS: [(u64, &str); 4] = [
+    (0x1, "needs media calibration"),
+    (0x2, "clean printhead"),
+    (0x4, "replace printhead"),
+    (0x8, "paper near end"),
+];
 
 pub async fn health(ip: &str) -> anyhow::Result<Health> {
     let got = query(
@@ -148,8 +166,15 @@ pub async fn health(ip: &str) -> anyhow::Result<Health> {
     };
     let num = |k: &str| get(k).parse::<u32>().ok();
 
-    let text = ask(ip, b"~HQES", |t| t.contains("WARNINGS")).await?;
-    let bits = parse_hqes(&text).ok_or_else(|| anyhow::anyhow!("no error status from {ip}"))?;
+    // complete once the warnings line has its flag and both groups
+    let text = ask(ip, b"~HQES", |t| {
+        t.split("WARNINGS:")
+            .nth(1)
+            .is_some_and(|w| w.split_whitespace().count() >= 3)
+    })
+    .await?;
+    let (errors, warnings) =
+        parse_hqes(&text).ok_or_else(|| anyhow::anyhow!("no error status from {ip}"))?;
 
     // paper_supply only notices missing media when the printer tries to feed, but the
     // transmissive sensor sees straight through to the light whichever sensor is selected
@@ -161,34 +186,118 @@ pub async fn health(ip: &str) -> anyhow::Result<Health> {
         status: get("device.status"),
         media: !see_through && get("sensor.paper_supply") != "out",
         head_closed: get("head.latch") == "ok",
-        paused: bits & PAUSED != 0,
-        errors: describe(bits & !PAUSED),
+        paused: errors & PAUSED != 0,
+        errors: names(errors & !PAUSED, &ERRORS, "error"),
+        warnings: names(warnings, &WARNINGS, "warning"),
     })
 }
 
-// "ERRORS:         1 00000000 00010001": set flag, then two 32 bit groups of error bits
-fn parse_hqes(text: &str) -> Option<u64> {
-    let groups: Vec<u64> = text
-        .split("ERRORS:")
-        .nth(1)?
-        .split("WARNINGS")
-        .next()?
-        .split_whitespace()
-        .skip(1)
-        .map(|g| u64::from_str_radix(g, 16).ok())
-        .collect::<Option<_>>()?;
-    let [high, low] = groups[..] else {
-        return None;
+// "ERRORS:   1 00000000 00010001" then "WARNINGS:   0 00000000 00000000": a set flag, then two
+// 32 bit groups of bits for each
+fn parse_hqes(text: &str) -> Option<(u64, u64)> {
+    let bits = |section: &str| -> Option<u64> {
+        let groups: Vec<u64> = section
+            .split_whitespace()
+            .skip(1)
+            .take(2)
+            .map(|g| u64::from_str_radix(g, 16).ok())
+            .collect::<Option<_>>()?;
+        let [high, low] = groups[..] else {
+            return None;
+        };
+        Some((high << 32) | low)
     };
-    Some((high << 32) | low)
+    let after_errors = text.split("ERRORS:").nth(1)?;
+    let mut parts = after_errors.split("WARNINGS:");
+    let errors = bits(parts.next()?)?;
+    let warnings = parts.next().and_then(bits).unwrap_or(0);
+    Some((errors, warnings))
 }
 
-fn describe(bits: u64) -> Option<String> {
-    match bits {
-        0 => None,
-        MEDIA_OUT => Some("media out".into()),
-        _ => Some(format!("{:08X} {:08X}", bits >> 32, bits & 0xFFFF_FFFF)),
+fn names(bits: u64, known: &[(u64, &str)], kind: &str) -> Vec<String> {
+    let mut out: Vec<String> = known
+        .iter()
+        .filter(|(bit, _)| bits & bit != 0)
+        .map(|(_, name)| name.to_string())
+        .collect();
+    let rest = known.iter().fold(bits, |b, (bit, _)| b & !bit);
+    if rest != 0 {
+        out.push(format!("other {kind} {rest:016X}"));
     }
+    out
+}
+
+// one line of the printer's full settings list
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Setting {
+    pub key: String,
+    pub value: String,
+    pub choices: Option<String>,
+}
+
+// every setting with a value, as the printer lists them in allcv
+pub async fn all_settings(ip: &str) -> anyhow::Result<Vec<Setting>> {
+    // the listing ends with "" but pauses for a couple of seconds partway through
+    let text = read_all(
+        ip,
+        b"! U1 getvar \"allcv\"\r\n",
+        Duration::from_secs(5),
+        |t| t.ends_with("\r\n\"\""),
+    )
+    .await?;
+    Ok(parse_allcv(&text))
+}
+
+// "ezpl.print_width : 406 , Choices: 2-448", "device.friendly_name : CSC50J173900310" and
+// "device.location :  ";
+// branch names ("ezpl.") and commands ("file.delete") have no value and are left out
+fn parse_allcv(text: &str) -> Vec<Setting> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, rest) = line.trim_start().split_once(" :")?;
+            let (value, choices) = match rest.rsplit_once(", Choices:") {
+                Some((v, c)) => (v, Some(c.trim().to_string())),
+                None => (rest, None),
+            };
+            Some(Setting {
+                // the whole listing is quoted, so the first key starts with "
+                key: key.trim().trim_start_matches('"').to_string(),
+                value: value.trim().to_string(),
+                choices,
+            })
+        })
+        .collect()
+}
+
+// send anything and return whatever the printer says back, for the printer page's command box
+pub async fn raw(ip: &str, data: &[u8]) -> anyhow::Result<String> {
+    read_all(ip, data, Duration::from_millis(1500), |_| false).await
+}
+
+// send on 9100 and read until `done` says the reply is complete or the printer has been quiet
+// for `idle`, for replies that may have no end marker. gives up reading after 20 s
+async fn read_all(
+    ip: &str,
+    command: &[u8],
+    idle: Duration,
+    done: impl Fn(&str) -> bool,
+) -> anyhow::Result<String> {
+    let mut s = connect(ip, 9100).await?;
+    s.write_all(command).await?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline {
+        match timeout(idle, s.read(&mut chunk)).await {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            Ok(Err(e)) => return Err(e.into()),
+        }
+        if done(&String::from_utf8_lossy(&buf)) {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 #[cfg(test)]
@@ -214,17 +323,47 @@ mod tests {
     }
 
     #[test]
-    fn reads_error_flags_and_names_paper_out() {
-        let status = |errors: &str| {
+    fn reads_error_and_warning_flags() {
+        let status = |errors: &str, warnings: &str| {
             format!(
-                "\r\n\r\n  PRINTER STATUS\r\n   ERRORS:         {errors}\r\n   WARNINGS:       0 00000000 00000000\r\n"
+                "\r\n\r\n  PRINTER STATUS\r\n   ERRORS:         {errors}\r\n   WARNINGS:       {warnings}\r\n"
             )
         };
-        assert_eq!(parse_hqes(&status("0 00000000 00000000")), Some(0));
-        let stuck = parse_hqes(&status("1 00000000 00010001")).unwrap();
-        assert_eq!(stuck & PAUSED, PAUSED);
-        assert_eq!(describe(stuck & !PAUSED).as_deref(), Some("media out"));
-        assert_eq!(describe(0x4).as_deref(), Some("00000000 00000004"));
+        assert_eq!(
+            parse_hqes(&status("0 00000000 00000000", "0 00000000 00000000")),
+            Some((0, 0))
+        );
+        let (errors, warnings) =
+            parse_hqes(&status("1 00000000 00010001", "1 00000000 00000002")).unwrap();
+        assert_eq!(errors & PAUSED, PAUSED);
+        assert_eq!(names(errors & !PAUSED, &ERRORS, "error"), ["media out"]);
+        assert_eq!(names(warnings, &WARNINGS, "warning"), ["clean printhead"]);
+        assert_eq!(names(0x5, &ERRORS, "error"), ["media out", "head open"]);
+        assert_eq!(
+            names(0x100, &ERRORS, "error"),
+            ["other error 0000000000000100"]
+        );
         assert_eq!(parse_hqes("no status here"), None);
+    }
+
+    #[test]
+    fn reads_the_full_settings_list() {
+        let allcv = "\"ezpl.\r\nezpl.print_width : 406 , Choices: 2-448\r\ndevice.friendly_name : CSC50J173900310\r\nfile.delete\r\nip.mirror.password : * \r\nprint.tone_format : zpl , Choices: zpl\r\ndevice.location :  \r\ndevice.print_out_report, Choices: settings,network\r\n";
+        let s = parse_allcv(allcv);
+        assert_eq!(s.len(), 5);
+        assert_eq!((s[4].key.as_str(), s[4].value.as_str()), ("device.location", ""));
+        assert_eq!(
+            s[0],
+            Setting {
+                key: "ezpl.print_width".into(),
+                value: "406".into(),
+                choices: Some("2-448".into())
+            }
+        );
+        assert_eq!(
+            (s[1].value.as_str(), s[1].choices.as_ref()),
+            ("CSC50J173900310", None)
+        );
+        assert_eq!(s[2].value, "*");
     }
 }
