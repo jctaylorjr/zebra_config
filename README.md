@@ -66,8 +66,8 @@ Unreachable printers are retried with backoff.
 
 ## Settings
 
-Stored in the app data folder (`%APPDATA%\com.jt1280.zebra_configure` on Windows,
-`~/.local/share/com.jt1280.zebra_configure` on Linux):
+Stored in the app data folder (`%APPDATA%\com.jt1280.zebra-configure` on Windows,
+`~/.local/share/com.jt1280.zebra-configure` on Linux):
 
 - `settings.json` — Zebra folders per model family, their firmware versions, and the theme.
 - `recent.json` — the last 20 printers opened on the Printer and Diagnose pages.
