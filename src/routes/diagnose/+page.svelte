@@ -2,16 +2,21 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { invoke } from '@tauri-apps/api/core';
-	import { listen } from '@tauri-apps/api/event';
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { onMount, tick, untrack } from 'svelte';
-	import { SvelteSet } from 'svelte/reactivity';
+	import {
+		applyFix,
+		diagnosePage,
+		diagnosisFor,
+		loadChecks,
+		picked,
+		runDiagnosis
+	} from '$lib/diagnose.svelte';
 	import {
 		diagnoseHref,
 		fits,
 		printerHref,
-		type CheckInfo,
 		type Finding,
 		type LogLine,
 		type Printer,
@@ -19,76 +24,49 @@
 	} from '$lib/types';
 
 	let ip = $derived(page.url.searchParams.get('ip') ?? '');
-	let printers = $state<Printer[]>([]);
-	let profiles = $state<Profile[]>([]);
-	let checks = $state<CheckInfo[]>([]);
-	const picked = new SvelteSet<string>();
-	let profileId = $state('');
-	let typed = $state('');
-
-	let running = $state(false);
-	let log = $state<LogLine[]>([]);
-	let findings = $state<Finding[] | null>(null);
-	let fixed = $state<Record<number, { busy?: boolean; done?: string; error?: string }>>({});
-	let error = $state('');
+	// the diagnosis lives in the store, so it's still here, and still running, after visiting
+	// other pages
+	let d = $derived(ip ? diagnosePage.runs[ip] : undefined);
 	let terminal = $state<HTMLElement>();
-	let run = 0;
-
-	const order = { error: 0, warning: 1, info: 2, ok: 3 };
 
 	onMount(() => {
 		(async () => {
-			printers = await invoke<Printer[]>('list_printers');
-			profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
-			checks = await invoke<CheckInfo[]>('diagnose_checks');
-			checks.filter((c) => !c.feeds).forEach((c) => picked.add(c.id));
+			diagnosePage.printers = await invoke<Printer[]>('list_printers');
+			diagnosePage.profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
+			await loadChecks();
 		})();
-		const un = listen<[number, LogLine]>('diagnose-log', (e) => {
-			const [from, line] = e.payload;
-			if (from === run) log.push(line);
-		});
-		return () => {
-			un.then((f) => f());
-		};
 	});
 
-	// compare with the printer's own profile, if it has one
-	let printer = $derived(printers.find((p) => p.ip === ip));
-	$effect(() => {
-		const assigned = printer?.profile_id ?? '';
-		untrack(() => (profileId = assigned));
-	});
-
-	// start over whenever a different printer is opened
-	$effect(() => {
-		ip;
+	// opening a printer remembers it for the sidebar
+	$effect.pre(() => {
+		if (!ip) return;
 		untrack(() => {
-			run++;
-			running = false;
-			log = [];
-			findings = null;
-			fixed = {};
-			error = '';
+			diagnosePage.ip = ip;
+			diagnosisFor(ip);
 		});
 	});
 
 	// keep the newest log line in view
 	$effect(() => {
-		log.length;
+		d?.log.length;
 		tick().then(() => terminal?.scrollTo({ top: terminal.scrollHeight }));
 	});
 
-	let fitting = $derived(profiles.filter((p) => !printer || fits(p.models, printer.model)));
-	let feeding = $derived(checks.filter((c) => c.feeds && picked.has(c.id)));
-	let problems = $derived(
-		(findings ?? [])
-			.map((f, i) => ({ f, i }))
-			.filter(({ f }) => f.severity === 'error' || f.severity === 'warning')
+	let printer = $derived(diagnosePage.printers.find((p) => p.ip === ip));
+	// compare with the printer's own profile unless another was chosen
+	let profileId = $derived(d?.profileId ?? printer?.profile_id ?? '');
+	let fitting = $derived(
+		diagnosePage.profiles.filter((p) => !printer || fits(p.models, printer.model))
 	);
-	let notes = $derived((findings ?? []).map((f, i) => ({ f, i })).filter(({ f }) => f.severity === 'info'));
-	let passed = $derived((findings ?? []).map((f, i) => ({ f, i })).filter(({ f }) => f.severity === 'ok'));
+	let feeding = $derived(diagnosePage.checks.filter((c) => c.feeds && picked.has(c.id)));
+
+	const numbered = (keep: (f: Finding) => boolean) =>
+		(d?.findings ?? []).map((f, i) => ({ f, i })).filter(({ f }) => keep(f));
+	let problems = $derived(numbered((f) => f.severity === 'error' || f.severity === 'warning'));
+	let notes = $derived(numbered((f) => f.severity === 'info'));
+	let passed = $derived(numbered((f) => f.severity === 'ok'));
 	let fixable = $derived(
-		(findings ?? []).map((f, i) => ({ f, i })).filter(({ f, i }) => f.fix && !fixed[i]?.done)
+		(d?.findings ?? []).map((f, i) => ({ f, i })).filter(({ f, i }) => f.fix && !d?.fixed[i]?.done)
 	);
 
 	function open(target: string) {
@@ -96,7 +74,7 @@
 	}
 
 	function setGroup(feeds: boolean, on: boolean) {
-		for (const c of checks.filter((c) => c.feeds === feeds)) {
+		for (const c of diagnosePage.checks.filter((c) => c.feeds === feeds)) {
 			if (on) picked.add(c.id);
 			else picked.delete(c.id);
 		}
@@ -110,31 +88,13 @@
 			);
 			if (!ok) return;
 		}
-		const id = ++run;
-		running = true;
-		log = [];
-		findings = null;
-		fixed = {};
-		error = '';
-		try {
-			const result = await invoke<Finding[]>('run_diagnostics', {
-				ip,
-				checks: checks.filter((c) => picked.has(c.id)).map((c) => c.id),
-				profileId: profileId || null,
-				pcOffsetMinutes: -new Date().getTimezoneOffset(),
-				run: id
-			});
-			if (id === run) findings = result.sort((a, b) => order[a.severity] - order[b.severity]);
-		} catch (e) {
-			if (id === run) error = String(e);
-		}
-		if (id === run) running = false;
+		runDiagnosis(ip, profileId);
 	}
 
 	const risky = ['restart', 'clear_error'];
 
-	async function applyFix(i: number, ask = true) {
-		const f = findings?.[i];
+	async function fix(i: number, ask = true) {
+		const f = d?.findings?.[i];
 		if (!f?.fix) return;
 		if (ask && risky.includes(f.fix.kind)) {
 			const ok = await confirm(
@@ -145,65 +105,65 @@
 			);
 			if (!ok) return;
 		}
-		fixed[i] = { busy: true };
-		log.push({ kind: 'step', text: `Fix: ${f.fix_label}` });
-		try {
-			const done = await invoke<string>('apply_fix', { ip, fix: f.fix });
-			fixed[i] = { done };
-			log.push({ kind: 'ok', text: done });
-		} catch (e) {
-			fixed[i] = { error: String(e) };
-			log.push({ kind: 'error', text: String(e) });
-		}
+		await applyFix(ip, i);
 	}
 
-	async function applyAll() {
-		const list = fixable.filter(({ i }) => !fixed[i]?.busy);
+	async function fixAll() {
+		const target = ip;
+		const list = fixable.filter(({ i }) => !d?.fixed[i]?.busy);
 		const ok = await confirm(
 			`Apply ${list.length} fixes?\n\n${list.map(({ f }) => `• ${f.fix_label}`).join('\n')}`,
 			{ title: 'Apply all fixes' }
 		);
 		if (!ok) return;
-		for (const { i } of list) await applyFix(i, false);
-	}
-
-	function copyLog() {
-		navigator.clipboard.writeText(log.map((l) => prompt(l) + l.text).join('\n'));
+		for (const { i } of list) await applyFix(target, i);
 	}
 
 	const icon: Record<string, string> = { error: '✗', warning: '!', info: 'i', ok: '✓' };
-	const marks: Record<string, string> = { send: '> ', reply: '  ', step: '── ', ok: '✓ ', info: 'i ', warn: '! ', error: '✗ ' };
+	const marks: Record<string, string> = {
+		send: '> ',
+		reply: '  ',
+		step: '── ',
+		ok: '✓ ',
+		info: 'i ',
+		warn: '! ',
+		error: '✗ '
+	};
 	const prompt = (l: LogLine) => marks[l.kind] ?? '';
+
+	function copyLog() {
+		navigator.clipboard.writeText((d?.log ?? []).map((l) => prompt(l) + l.text).join('\n'));
+	}
 </script>
 
 <div class="top">
 	<h1>Diagnose{ip ? ` ${ip}` : ''}</h1>
 	<select value={ip} onchange={(e) => open(e.currentTarget.value)}>
 		<option value="" disabled>Choose a printer…</option>
-		{#each printers as p}
+		{#each diagnosePage.printers as p}
 			<option value={p.ip}>{p.ip}{p.model ? ` (${p.model})` : ''}</option>
 		{/each}
 	</select>
 	<form
 		onsubmit={(e) => {
 			e.preventDefault();
-			open(typed);
+			open(diagnosePage.typed);
 		}}
 	>
-		<input bind:value={typed} placeholder="or another IP / hostname" />
-		<button type="submit" disabled={!typed.trim()}>Open</button>
+		<input bind:value={diagnosePage.typed} placeholder="or another IP / hostname" />
+		<button type="submit" disabled={!diagnosePage.typed.trim()}>Open</button>
 	</form>
 	{#if ip}<a class="button" href={printerHref(ip)}>Printer page</a>{/if}
 </div>
 
 {#if !ip}
 	<p class="muted">Choose a printer to diagnose, or open one from its Printer page.</p>
-{:else}
+{:else if d}
 	<section class="card">
 		<div class="row">
 			<label class="field">
 				<span>Compare with profile</span>
-				<select bind:value={profileId}>
+				<select value={profileId} onchange={(e) => d && (d.profileId = e.currentTarget.value)}>
 					<option value="">None</option>
 					{#each fitting as p}<option value={p.id}>{p.name}</option>{/each}
 				</select>
@@ -220,7 +180,7 @@
 					{#if feeds}
 						<p class="muted small">These print labels, and only run if media is loaded.</p>
 					{/if}
-					{#each checks.filter((c) => c.feeds === feeds) as c}
+					{#each diagnosePage.checks.filter((c) => c.feeds === feeds) as c}
 						<label class="check">
 							<input
 								type="checkbox"
@@ -234,27 +194,27 @@
 			{/each}
 		</div>
 		<div class="row">
-			<button class="primary" disabled={running || picked.size === 0} onclick={start}>
-				{running ? 'Diagnosing…' : 'Run diagnosis'}
+			<button class="primary" disabled={d.running || picked.size === 0} onclick={start}>
+				{d.running ? 'Diagnosing…' : 'Run diagnosis'}
 			</button>
 			<span class="muted">{picked.size} checks, plus the connection</span>
-			{#if error}<span class="error">{error}</span>{/if}
+			{#if d.error}<span class="error">{d.error}</span>{/if}
 		</div>
 	</section>
 
-	{#if log.length}
+	{#if d.log.length}
 		<div class="term-head">
 			<strong>Log</strong>
 			<button class="link" onclick={copyLog}>Copy</button>
 		</div>
 		<div class="terminal" bind:this={terminal} role="log">
-			{#each log as l}
+			{#each d.log as l}
 				<div class={l.kind}>{prompt(l)}{l.text}</div>
 			{/each}
 		</div>
 	{/if}
 
-	{#if findings}
+	{#if d.findings}
 		<section class="card results">
 			<div class="row">
 				<h2>
@@ -263,12 +223,13 @@
 						: `${problems.length} ${problems.length === 1 ? 'problem' : 'problems'} found`}
 				</h2>
 				{#if fixable.length > 1}
-					<button class="primary" onclick={applyAll}>Apply all {fixable.length} fixes</button>
+					<button class="primary" onclick={fixAll}>Apply all {fixable.length} fixes</button>
 				{/if}
-				<button onclick={start} disabled={running}>Run again</button>
+				<button onclick={start} disabled={d.running}>Run again</button>
 			</div>
 
 			{#snippet item(f: Finding, i: number)}
+				{@const state = d?.fixed[i]}
 				<li class={f.severity}>
 					<span class="badge">{icon[f.severity]}</span>
 					<div>
@@ -289,13 +250,13 @@
 						{/if}
 						{#if f.fix}
 							<p class="fix">
-								{#if fixed[i]?.done}
-									<span class="ok">✓ {fixed[i].done}</span>
+								{#if state?.done}
+									<span class="ok">✓ {state.done}</span>
 								{:else}
-									<button disabled={fixed[i]?.busy} onclick={() => applyFix(i)}>
-										{fixed[i]?.busy ? 'Working…' : f.fix_label}
+									<button disabled={state?.busy} onclick={() => fix(i)}>
+										{state?.busy ? 'Working…' : f.fix_label}
 									</button>
-									{#if fixed[i]?.error}<span class="error">{fixed[i].error}</span>{/if}
+									{#if state?.error}<span class="error">{state.error}</span>{/if}
 								{/if}
 							</p>
 						{/if}

@@ -1,5 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { diagnosePage } from '$lib/diagnose.svelte';
+	import { printerPage } from '$lib/printer.svelte';
+	import { diagnoseHref, printerHref } from '$lib/types';
 
 	let { children } = $props();
 
@@ -37,6 +40,14 @@
 		}
 	];
 
+	// the Printer and Diagnose links go back to the printer each had open
+	const linkFor = (href: string) =>
+		href === '/printer' && printerPage.ip
+			? printerHref(printerPage.ip)
+			: href === '/diagnose' && diagnosePage.ip
+				? diagnoseHref(diagnosePage.ip)
+				: href;
+
 	// mouse back and forward buttons, and Alt+arrows, move through the pages visited. the
 	// webview's own handling is stopped, so a click doesn't navigate twice
 	function mouseNav(e: MouseEvent) {
@@ -60,7 +71,7 @@
 	<nav>
 		{#each sections as s}
 			<a
-				href={s.href}
+				href={linkFor(s.href)}
 				class:active={s.href === '/'
 					? page.url.pathname === '/'
 					: page.url.pathname.startsWith(s.href)}

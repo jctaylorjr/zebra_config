@@ -6,6 +6,7 @@
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { onMount, untrack } from 'svelte';
 	import { picks } from '$lib/configure.svelte';
+	import { printerPage, viewFor } from '$lib/printer.svelte';
 	import {
 		diagnoseHref,
 		fits,
@@ -20,34 +21,9 @@
 	} from '$lib/types';
 
 	let ip = $derived(page.url.searchParams.get('ip') ?? '');
-	let printers = $state<Printer[]>([]);
-	let typed = $state('');
-
-	let details = $state<Details | null>(null);
-	let detailsError = $state('');
-	let updated = $state('');
-	let autoRefresh = $state(true);
-
-	let all = $state<PrinterSetting[] | null>(null);
-	let allError = $state('');
-	let allLoading = $state(false);
-	let filter = $state('');
-
-	let busy = $state<string | null>(null);
-	let actionNote = $state('');
-	let actionError = $state('');
-
-	let rawCommand = $state('');
-	let rawReply = $state<string | null>(null);
-	let rawBusy = $state(false);
-
-	let profiles = $state<Profile[]>([]);
-	let folders = $state<FolderView[]>([]);
-	let setupError = $state('');
-	let calMethod = $state(''); // empty until picked: follows the printer's media type
-	let calBusy = $state(false);
-	let calNote = $state('');
-	let calError = $state('');
+	// everything shown for this printer lives in the store, so it's still here after visiting
+	// other pages
+	let v = $derived(ip ? printerPage.views[ip] : undefined);
 
 	// the settings worth seeing first; the full list is further down
 	const groups: { title: string; rows: [string, string][] }[] = [
@@ -107,9 +83,10 @@
 	// the odometer reports distances in centimetres
 	const distances = ['odometer.headclean', 'odometer.headnew', 'odometer.total_print_length'];
 
-	const show = (key: string, v: unknown) => {
-		if (v === null || v === undefined) return key === 'ip.hostname' ? 'not on this firmware' : '—';
-		const s = String(v);
+	const show = (key: string, val: unknown) => {
+		if (val === null || val === undefined)
+			return key === 'ip.hostname' ? 'not on this firmware' : '—';
+		const s = String(val);
 		if (distances.includes(key) && /^\d+$/.test(s)) {
 			const m = Number(s) / 100;
 			return `${Math.round(m).toLocaleString()} m (${Math.round(m * 3.28084).toLocaleString()} ft)`;
@@ -144,35 +121,86 @@
 
 	onMount(() => {
 		(async () => {
-			printers = await invoke<Printer[]>('list_printers');
-			profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
-			folders = await invoke<FolderView[]>('list_folders');
+			printerPage.printers = await invoke<Printer[]>('list_printers');
+			printerPage.profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
+			printerPage.folders = await invoke<FolderView[]>('list_folders');
 		})();
 		const un = listen<Printer>('printer-update', (e) => {
-			printers = printers.map((x) => (x.ip === e.payload.ip ? e.payload : x));
+			printerPage.printers = printerPage.printers.map((x) =>
+				x.ip === e.payload.ip ? e.payload : x
+			);
 		});
 		return () => {
 			un.then((f) => f());
 		};
 	});
 
-	let listed = $derived(printers.find((p) => p.ip === ip));
-	let fitting = $derived(profiles.filter((p) => fits(p.models, listed?.model ?? null)));
-	let folder = $derived(listed ? folderFor(folders, listed.model) : undefined);
+	// opening a printer remembers it for the sidebar, reads it, and reads every setting the
+	// first time it's opened
+	$effect.pre(() => {
+		if (!ip) return;
+		untrack(() => {
+			printerPage.ip = ip;
+			const first = !printerPage.views[ip];
+			viewFor(ip);
+			refresh(ip);
+			if (first) loadAll(ip);
+		});
+	});
+
+	$effect(() => {
+		if (!ip || !printerPage.autoRefresh) return;
+		const target = ip;
+		const timer = setInterval(() => refresh(target), 5000);
+		return () => clearInterval(timer);
+	});
+
+	let listed = $derived(printerPage.printers.find((p) => p.ip === ip));
+	let fitting = $derived(
+		printerPage.profiles.filter((p) => fits(p.models, listed?.model ?? null))
+	);
+	let folder = $derived(listed ? folderFor(printerPage.folders, listed.model) : undefined);
 	let chosenProfile = $derived(listed ? (picks.profile[ip] ?? listed.profile_id ?? '') : '');
 
+	// each of these writes to the view of the printer it started on, even if another printer
+	// is open by the time it finishes
+	async function refresh(target: string) {
+		const view = viewFor(target);
+		try {
+			view.details = await invoke<Details>('printer_details', { ip: target, keys });
+			view.detailsError = '';
+			view.updated = new Date().toLocaleTimeString();
+		} catch (e) {
+			view.detailsError = String(e);
+		}
+	}
+
+	async function loadAll(target: string) {
+		const view = viewFor(target);
+		view.allLoading = true;
+		view.allError = '';
+		try {
+			view.all = await invoke<PrinterSetting[]>('printer_settings', { ip: target });
+		} catch (e) {
+			view.allError = String(e);
+		}
+		view.allLoading = false;
+	}
+
 	async function addToList() {
-		setupError = '';
+		const view = viewFor(ip);
+		view.setupError = '';
 		try {
 			const p = await invoke<Printer>('add_printer', { ip });
-			printers = [...printers, p];
+			printerPage.printers = [...printerPage.printers, p];
 		} catch (e) {
-			setupError = String(e);
+			view.setupError = String(e);
 		}
 	}
 
 	async function applyProfile() {
-		setupError = '';
+		const view = viewFor(ip);
+		view.setupError = '';
 		try {
 			await invoke('apply_profile', {
 				ip,
@@ -180,7 +208,7 @@
 				useFolder: picks.useFolder[ip] ?? true
 			});
 		} catch (e) {
-			setupError = String(e);
+			view.setupError = String(e);
 		}
 	}
 
@@ -192,132 +220,88 @@
 		auto_detect: 'auto'
 	};
 	let method = $derived(
-		calMethod || methodFor[String(details?.values['ezpl.media_type'] ?? '')] || 'gap'
+		v?.calMethod || methodFor[String(v?.details?.values['ezpl.media_type'] ?? '')] || 'gap'
 	);
 
-	async function calibrate() {
-		if (details && !(details.media && details.head_closed)) {
-			const why = details.head_closed ? 'doesn’t see any media' : 'has its head open';
-			const ok = await confirm(
-				`The printer ${why}. Calibrating now would leave it in an error. Calibrate anyway?`,
-				{ title: 'Calibrate' }
-			);
-			if (!ok) return;
-		}
-		calBusy = true;
-		calNote = calError = '';
-		try {
-			calNote = await invoke<string>('printer_calibrate', { ip, method });
-		} catch (e) {
-			calError = String(e);
-		}
-		calBusy = false;
-		refresh();
-	}
-
-	async function refresh() {
-		const target = ip;
-		if (!target) return;
-		try {
-			const d = await invoke<Details>('printer_details', { ip: target, keys });
-			if (target !== ip) return;
-			details = d;
-			detailsError = '';
-			updated = new Date().toLocaleTimeString();
-		} catch (e) {
-			if (target === ip) detailsError = String(e);
-		}
-	}
-
-	async function loadAll() {
-		const target = ip;
-		if (!target) return;
-		allLoading = true;
-		allError = '';
-		try {
-			const r = await invoke<PrinterSetting[]>('printer_settings', { ip: target });
-			if (target === ip) all = r;
-		} catch (e) {
-			if (target === ip) allError = String(e);
-		}
-		allLoading = false;
-	}
-
-	// start over whenever a different printer is opened
-	$effect(() => {
-		ip;
-		untrack(() => {
-			details = null;
-			detailsError = '';
-			all = null;
-			rawReply = null;
-			actionNote = actionError = '';
-			calMethod = calNote = calError = setupError = '';
-			refresh();
-			loadAll();
+	// feeding with no media or the head open leaves the printer in an error
+	async function okToFeed(title: string, doing: string) {
+		const d = v?.details;
+		if (!d || (d.media && d.head_closed)) return true;
+		const why = d.head_closed ? 'doesn’t see any media' : 'has its head open';
+		return confirm(`The printer ${why}. ${doing} now would leave it in an error. Go ahead?`, {
+			title
 		});
-	});
+	}
 
-	$effect(() => {
-		if (!ip || !autoRefresh) return;
-		const timer = setInterval(refresh, 5000);
-		return () => clearInterval(timer);
-	});
+	async function calibrate() {
+		if (!(await okToFeed('Calibrate', 'Calibrating'))) return;
+		const target = ip;
+		const view = viewFor(target);
+		view.calBusy = true;
+		view.calNote = view.calError = '';
+		try {
+			view.calNote = await invoke<string>('printer_calibrate', { ip: target, method });
+		} catch (e) {
+			view.calError = String(e);
+		}
+		view.calBusy = false;
+		refresh(target);
+	}
+
+	async function run(a: (typeof actions)[number]) {
+		if (a.feeds && !(await okToFeed(a.label, 'Feeding'))) return;
+		if (a.ask && !(await confirm(a.ask, { title: a.label }))) return;
+		const target = ip;
+		const view = viewFor(target);
+		view.busy = a.id;
+		view.actionNote = view.actionError = '';
+		try {
+			const done = await invoke<string>('printer_action', { ip: target, action: a.id });
+			view.actionNote = `${a.label}: ${done}`;
+		} catch (e) {
+			view.actionError = `${a.label}: ${e}`;
+		}
+		view.busy = null;
+		refresh(target);
+	}
+
+	async function sendRaw() {
+		const target = ip;
+		const view = viewFor(target);
+		if (!view.rawCommand.trim()) return;
+		view.rawBusy = true;
+		try {
+			const reply = await invoke<string>('printer_raw', { ip: target, command: view.rawCommand });
+			view.rawReply = reply || '(no reply)';
+		} catch (e) {
+			view.rawReply = `Failed: ${e}`;
+		}
+		view.rawBusy = false;
+	}
 
 	let alerts = $derived.by(() => {
-		if (!details) return [];
+		const d = v?.details;
+		if (!d) return [];
 		const list = [
-			...details.errors.map((text) => ({ level: 'error', text })),
-			...details.warnings.map((text) => ({ level: 'warn', text }))
+			...d.errors.map((text) => ({ level: 'error', text })),
+			...d.warnings.map((text) => ({ level: 'warn', text }))
 		];
-		if (details.paused) list.push({ level: 'warn', text: 'paused' });
-		if (!details.head_closed && !details.errors.includes('head open'))
+		if (d.paused) list.push({ level: 'warn', text: 'paused' });
+		if (!d.head_closed && !d.errors.includes('head open'))
 			list.push({ level: 'error', text: 'head open' });
-		if (details.head_closed && !details.media && !details.errors.includes('media out'))
+		if (d.head_closed && !d.media && !d.errors.includes('media out'))
 			list.push({ level: 'warn', text: 'no media detected' });
 		return list;
 	});
 
 	let shown = $derived(
-		(all ?? []).filter((s) =>
-			`${s.key} ${s.value}`.toLowerCase().includes(filter.trim().toLowerCase())
+		(v?.all ?? []).filter((s) =>
+			`${s.key} ${s.value}`.toLowerCase().includes((v?.filter ?? '').trim().toLowerCase())
 		)
 	);
 
 	function open(target: string) {
 		if (target.trim()) goto(printerHref(target.trim()));
-	}
-
-	async function run(a: (typeof actions)[number]) {
-		if (a.feeds && details && !(details.media && details.head_closed)) {
-			const why = details.head_closed ? 'doesn’t see any media' : 'has its head open';
-			const ok = await confirm(
-				`The printer ${why}. Feeding now would leave it in an error. Send anyway?`,
-				{ title: a.label }
-			);
-			if (!ok) return;
-		}
-		if (a.ask && !(await confirm(a.ask, { title: a.label }))) return;
-		busy = a.id;
-		actionNote = actionError = '';
-		try {
-			actionNote = `${a.label}: ${await invoke<string>('printer_action', { ip, action: a.id })}`;
-		} catch (e) {
-			actionError = `${a.label}: ${e}`;
-		}
-		busy = null;
-		refresh();
-	}
-
-	async function sendRaw() {
-		if (!rawCommand.trim()) return;
-		rawBusy = true;
-		try {
-			rawReply = (await invoke<string>('printer_raw', { ip, command: rawCommand })) || '(no reply)';
-		} catch (e) {
-			rawReply = `Failed: ${e}`;
-		}
-		rawBusy = false;
 	}
 </script>
 
@@ -325,18 +309,18 @@
 	<h1>{ip || 'Printer'}</h1>
 	<select value={ip} onchange={(e) => open(e.currentTarget.value)}>
 		<option value="" disabled>Choose a printer…</option>
-		{#each printers as p}
+		{#each printerPage.printers as p}
 			<option value={p.ip}>{p.ip}{p.model ? ` (${p.model})` : ''}</option>
 		{/each}
 	</select>
 	<form
 		onsubmit={(e) => {
 			e.preventDefault();
-			open(typed);
+			open(printerPage.typed);
 		}}
 	>
-		<input bind:value={typed} placeholder="or another IP / hostname" />
-		<button type="submit" disabled={!typed.trim()}>Open</button>
+		<input bind:value={printerPage.typed} placeholder="or another IP / hostname" />
+		<button type="submit" disabled={!printerPage.typed.trim()}>Open</button>
 	</form>
 	{#if ip}<a class="button" href={diagnoseHref(ip)}>Diagnose</a>{/if}
 </div>
@@ -345,21 +329,23 @@
 	<p class="muted">
 		Choose a printer, or open one from the Configure page by clicking its address.
 	</p>
-{:else}
+{:else if v}
 	<div class="bar">
-		{#if details}
-			<span class="chip" class:busy={details.status === 'busy'}>{details.status || 'unknown'}</span>
+		{#if v.details}
+			<span class="chip" class:busy={v.details.status === 'busy'}
+				>{v.details.status || 'unknown'}</span
+			>
 		{/if}
-		<button onclick={refresh}>Refresh</button>
-		<label><input type="checkbox" bind:checked={autoRefresh} /> Refresh every 5 s</label>
-		{#if updated}<span class="muted">Updated {updated}</span>{/if}
-		{#if detailsError}<span class="error">{detailsError}</span>{/if}
+		<button onclick={() => refresh(ip)}>Refresh</button>
+		<label><input type="checkbox" bind:checked={printerPage.autoRefresh} /> Refresh every 5 s</label>
+		{#if v.updated}<span class="muted">Updated {v.updated}</span>{/if}
+		{#if v.detailsError}<span class="error">{v.detailsError}</span>{/if}
 	</div>
 
 	<section class="card alerts">
 		<h2>Alerts</h2>
-		{#if !details}
-			<p class="muted">{detailsError ? 'Can’t reach the printer.' : 'Reading…'}</p>
+		{#if !v.details}
+			<p class="muted">{v.detailsError ? 'Can’t reach the printer.' : 'Reading…'}</p>
 		{:else if alerts.length === 0}
 			<p class="ok">No alerts</p>
 		{:else}
@@ -405,13 +391,13 @@
 				<p class="muted">Profiles can be applied to printers in the Configure list.</p>
 				<button onclick={addToList}>Add {ip} to the list</button>
 			{/if}
-			{#if setupError}<p class="error">{setupError}</p>{/if}
+			{#if v.setupError}<p class="error">{v.setupError}</p>{/if}
 		</section>
 
 		<section class="card">
 			<h2>Calibrate</h2>
 			<div class="stack">
-				<select value={method} onchange={(e) => (calMethod = e.currentTarget.value)}>
+				<select value={method} onchange={(e) => v && (v.calMethod = e.currentTarget.value)}>
 					<option value="gap">Gap/notch (transmissive sensor)</option>
 					<option value="mark">Black mark (reflective sensor)</option>
 					<option value="continuous">Continuous</option>
@@ -421,11 +407,11 @@
 					>Also sets the printer's media type to this. Auto-detect can mistake the gaps between
 					wristbands for gap/notch media, so pick black mark for marked wristbands.</small
 				>
-				<button class="primary" disabled={calBusy} onclick={calibrate}>
-					{calBusy ? 'Calibrating…' : 'Calibrate'}
+				<button class="primary" disabled={v.calBusy} onclick={calibrate}>
+					{v.calBusy ? 'Calibrating…' : 'Calibrate'}
 				</button>
-				{#if calError}<span class="error">{calError}</span>{:else if calNote}<span class="ok"
-						>{calNote}</span
+				{#if v.calError}<span class="error">{v.calError}</span>{:else if v.calNote}<span
+						class="ok">{v.calNote}</span
 					>{/if}
 			</div>
 		</section>
@@ -436,7 +422,7 @@
 				<dl>
 					{#each g.rows as [label, key]}
 						<dt title={key}>{label}</dt>
-						<dd>{details ? show(key, details.values[key]) : '…'}</dd>
+						<dd>{v.details ? show(key, v.details.values[key]) : '…'}</dd>
 					{/each}
 				</dl>
 			</section>
@@ -447,13 +433,15 @@
 		<h2>Commands</h2>
 		<div class="actions">
 			{#each actions as a}
-				<button disabled={busy !== null} title={a.hint} onclick={() => run(a)}>
-					{busy === a.id ? `${a.label}…` : a.label}
+				<button disabled={v.busy !== null} title={a.hint} onclick={() => run(a)}>
+					{v.busy === a.id ? `${a.label}…` : a.label}
 				</button>
 			{/each}
 		</div>
-		{#if actionError}<p class="error">{actionError}</p>{:else if actionNote}<p class="muted">
-				{actionNote}
+		{#if v.actionError}<p class="error">{v.actionError}</p>{:else if v.actionNote}<p
+				class="muted"
+			>
+				{v.actionNote}
 			</p>{/if}
 
 		<form
@@ -463,24 +451,29 @@
 				sendRaw();
 			}}
 		>
-			<input bind:value={rawCommand} placeholder={'Send a command, e.g. ! U1 getvar "device.uptime"'} />
-			<button type="submit" disabled={rawBusy || !rawCommand.trim()}>
-				{rawBusy ? 'Sending…' : 'Send'}
+			<input
+				bind:value={v.rawCommand}
+				placeholder={'Send a command, e.g. ! U1 getvar "device.uptime"'}
+			/>
+			<button type="submit" disabled={v.rawBusy || !v.rawCommand.trim()}>
+				{v.rawBusy ? 'Sending…' : 'Send'}
 			</button>
 		</form>
-		{#if rawReply !== null}<pre>{rawReply}</pre>{/if}
+		{#if v.rawReply !== null}<pre>{v.rawReply}</pre>{/if}
 	</section>
 
 	<section class="card">
 		<div class="bar">
 			<h2>All settings</h2>
-			<input bind:value={filter} placeholder="Filter, e.g. wlan or 406" />
-			<button onclick={loadAll} disabled={allLoading}>{allLoading ? 'Reading…' : 'Reload'}</button>
-			{#if all}<span class="muted">{shown.length} of {all.length}</span>{/if}
+			<input bind:value={v.filter} placeholder="Filter, e.g. wlan or 406" />
+			<button onclick={() => loadAll(ip)} disabled={v.allLoading}
+				>{v.allLoading ? 'Reading…' : 'Reload'}</button
+			>
+			{#if v.all}<span class="muted">{shown.length} of {v.all.length}</span>{/if}
 		</div>
-		{#if allError}
-			<p class="error">{allError}</p>
-		{:else if all}
+		{#if v.allError}
+			<p class="error">{v.allError}</p>
+		{:else if v.all}
 			<table class="all">
 				<colgroup><col style="width: 38%" /><col style="width: 30%" /><col /></colgroup>
 				<thead><tr><th>Setting</th><th>Value</th><th>Choices</th></tr></thead>
