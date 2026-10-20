@@ -1,0 +1,44 @@
+name: Release
+
+# builds the Windows installers and attaches them to a GitHub release. runs when a version tag
+# such as v0.1.0 is pushed, or by hand from the Actions tab; the release is named after the
+# version in src-tauri/tauri.conf.json
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: bun install --frozen-lockfile
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: bun run tauri
+          tagName: v__VERSION__
+          releaseName: Zebra Configure v__VERSION__
+          releaseDraft: false
+          prerelease: false
+          releaseBody: |
+            ## Installing on Windows
+
+            Download one of these from **Assets** below:
+
+            - **`Zebra Configure_…_x64-setup.exe`**: installs just for you, with no admin rights needed. Use this one.
+            - **`Zebra Configure_…_x64_en-US.msi`**: installs for everyone on the PC, for IT to deploy.
+
+            The installers aren't code-signed yet, so Windows may say "Windows protected your PC". Choose **More info**, then **Run anyway**. If CrowdStrike blocks it, ask IT to allow it.
+
+            Installing a newer version keeps your profiles, settings and recent printers.

@@ -31,6 +31,21 @@ The Printer page only polls its printer while the window is focused. Applying pr
 diagnoses happen in the backend, so they carry on whichever page is open and whether or not the
 window has focus.
 
+## Installing
+
+Download the latest installer from the repository's
+[Releases](https://github.com/jctaylorjr/zebra_config/releases) page:
+
+- `Zebra Configure_…_x64-setup.exe` installs for the current user, without admin rights.
+- `Zebra Configure_…_x64_en-US.msi` installs for every user of the PC, for IT to deploy.
+
+They aren't code-signed yet, so Windows SmartScreen may warn about them: choose More info, then
+Run anyway. Updating keeps profiles, settings and recent printers.
+
+To publish a new version, raise `version` in `src-tauri/tauri.conf.json` and push a matching tag,
+e.g. `git tag v0.2.0 && git push origin v0.2.0`. GitHub Actions builds the installers and attaches
+them to a release for that tag.
+
 ## What applying does
 
 1. **Zebra folder** — the printer's model picks a folder laid out like a USB mirror stick:

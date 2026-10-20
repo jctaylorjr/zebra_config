@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+	<!-- Zebra Configure: a desktop label printer with a zebra-striped lid, printing a barcode label.
+	     the source for every icon size; regenerate them with `bun run tauri icon icons/app-icon.svg` -->
+	<defs>
+		<clipPath id="lid">
+			<path d="M176 540V480a170 170 0 0 1 170-170h332a170 170 0 0 1 170 170v60z" />
+		</clipPath>
+	</defs>
+
+	<!-- dark tile, so it reads on light and dark taskbars -->
+	<rect x="56" y="56" width="912" height="912" rx="208" fill="#16181d" />
+
+	<!-- printer: lid and base -->
+	<path
+		d="M176 690V480a170 170 0 0 1 170-170h332a170 170 0 0 1 170 170v210a30 30 0 0 1-30 30H206a30 30 0 0 1-30-30z"
+		fill="#f4f4f2"
+	/>
+
+	<!-- zebra stripes on the lid -->
+	<g clip-path="url(#lid)" fill="#16181d">
+		<path d="M226 290h58c92 70 20 168 60 250h-34c-46-82 22-170-84-250z" />
+		<path d="M376 290h104c64 90 -10 172 40 250h-58c-44-84 34-166-86-250z" />
+		<path d="M576 290h80c58 96 -6 170 30 250h-46c-34-82 26-170-64-250z" />
+		<path d="M744 290h58c40 100 -4 168 18 250h-32c-26-82 14-172-44-250z" />
+	</g>
+
+	<!-- seam between lid and base, and the front slot -->
+	<rect x="176" y="538" width="672" height="20" fill="#16181d" />
+	<rect x="236" y="628" width="552" height="36" rx="18" fill="#16181d" />
+
+	<!-- the label coming out, with a barcode -->
+	<rect x="356" y="646" width="312" height="252" rx="24" fill="#ffb81c" />
+	<g fill="#16181d">
+		<rect x="404" y="706" width="26" height="132" rx="6" />
+		<rect x="452" y="706" width="14" height="132" rx="5" />
+		<rect x="488" y="706" width="38" height="132" rx="6" />
+		<rect x="548" y="706" width="14" height="132" rx="5" />
+		<rect x="584" y="706" width="36" height="132" rx="6" />
+	</g>
+</svg>

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "zebra_configure",
+  "productName": "Zebra Configure",
   "version": "0.1.0",
   "identifier": "com.jt1280.zebra_configure",
   "build": {
@@ -30,6 +30,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "jctaylorjr",
+    "shortDescription": "Configures Zebra printers over the network",
+    "longDescription": "Sets up Zebra printers from profiles and USB mirror folders, shows one printer's status and settings, and diagnoses problems.",
+    "category": "Utility",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }
