@@ -58,6 +58,27 @@ To publish a new version, raise `version` in `src-tauri/tauri.conf.json` and pus
 e.g. `git tag v0.2.0 && git push origin v0.2.0`. GitHub Actions builds the installers and attaches
 them to a release for that tag.
 
+### Building it yourself
+
+Where the installers can't be downloaded, build the app on the PC from its source instead. Download
+the source (Code, then Download ZIP on GitHub), extract it, and double-click `build.cmd`, or run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1
+```
+
+It installs what the build needs, if it isn't there already: Visual Studio Build Tools with the C++
+tools (for every user, so Windows asks for admin), and Rust and Bun (into your user profile). Then
+it builds `dist\Zebra Configure.exe`, which runs on its own; add `-Installer` to build the setup
+program too. Run it as yourself rather than as administrator.
+
+The first build takes a while: the Build Tools take 10–20 minutes to install, and the app another
+5–10 minutes to build. The build's files (about 1.5 GB) go in `%LOCALAPPDATA%\zebra-configure-build`,
+which every copy of the source shares, so building a newer download only rebuilds what changed;
+delete the folder to free the space. Extract the source to a folder on the PC rather than a network
+drive. Run from anywhere else, the script downloads the source from GitHub first; `-Branch` picks
+the branch.
+
 ## What applying does
 
 1. **Zebra folder** — the printer's model picks a folder laid out like a USB mirror stick:
