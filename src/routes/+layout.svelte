@@ -1,8 +1,16 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { onMount } from 'svelte';
+	import { fly } from 'svelte/transition';
 	import { diagnosePage } from '$lib/diagnose.svelte';
 	import { printerPage } from '$lib/printer.svelte';
+	import { loadRecent } from '$lib/recent.svelte';
+	import { toast } from '$lib/toast.svelte';
 	import { diagnoseHref, printerHref } from '$lib/types';
+
+	onMount(() => {
+		loadRecent();
+	});
 
 	let { children } = $props();
 
@@ -86,6 +94,14 @@
 		{@render children()}
 	</main>
 </div>
+
+{#if toast.text}
+	{#key toast.id}
+		<div class="toast" class:error={toast.error} role="status" transition:fly|global={{ y: 12, duration: 160 }}>
+			{toast.text}
+		</div>
+	{/key}
+{/if}
 
 <style>
 	:global(:root) {
@@ -232,5 +248,25 @@
 		flex: 1;
 		min-width: 0;
 		padding: 20px 24px;
+	}
+	.toast {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 22px;
+		margin: 0 auto;
+		width: fit-content;
+		padding: 8px 16px;
+		border-radius: 999px;
+		background: var(--fg);
+		color: var(--bg);
+		font-weight: 600;
+		box-shadow: 0 4px 14px rgb(0 0 0 / 0.2);
+		pointer-events: none;
+		z-index: 10;
+	}
+	.toast.error {
+		background: var(--danger);
+		color: #fff;
 	}
 </style>

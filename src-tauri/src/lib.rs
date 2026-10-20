@@ -3,6 +3,7 @@ mod diagnose;
 mod model;
 mod printer;
 mod profiles;
+mod recent;
 mod settings;
 mod setup;
 mod usb;
@@ -20,6 +21,7 @@ pub struct AppState {
     profiles_error: Mutex<Option<String>>, // why profiles.json couldn't be read; saving is blocked
     tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     settings: Mutex<settings::Settings>,
+    recent: Mutex<Vec<recent::Recent>>,
 }
 
 #[tauri::command]
@@ -253,6 +255,86 @@ async fn printer_raw(ip: String, command: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn recent_printers(state: State<'_, AppState>) -> Vec<recent::Recent> {
+    state.recent.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn remember_printer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    address: String,
+    model: Option<String>,
+    serial: Option<String>,
+    hostname: Option<String>,
+    ip_addr: Option<String>,
+) -> Result<Vec<recent::Recent>, String> {
+    let mut list = state.recent.lock().unwrap();
+    recent::remember(
+        &mut list,
+        recent::Recent {
+            address,
+            model,
+            serial,
+            hostname,
+            ip_addr,
+            last_used: recent::now(),
+        },
+    );
+    recent::save(&app, &list).map_err(|e| e.to_string())?;
+    Ok(list.clone())
+}
+
+#[tauri::command]
+fn forget_printer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    address: String,
+) -> Result<Vec<recent::Recent>, String> {
+    let mut list = state.recent.lock().unwrap();
+    recent::forget(&mut list, &address);
+    recent::save(&app, &list).map_err(|e| e.to_string())?;
+    Ok(list.clone())
+}
+
+// what the Diagnose page shows about a printer when it's opened
+#[derive(Serialize)]
+struct Identity {
+    model: Option<String>,
+    serial: Option<String>,
+    hostname: Option<String>, // ip.hostname on Link-OS 7.6 and later, else the friendly name
+    ip_addr: Option<String>,
+}
+
+#[tauri::command]
+async fn identify(ip: String) -> Result<Identity, String> {
+    let v = printer::query(
+        &ip,
+        &[
+            "device.product_name",
+            "device.unique_id",
+            "ip.hostname",
+            "device.friendly_name",
+            "interface.network.active.ip_addr",
+        ],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let get = |k: &str| {
+        v[k].as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    Ok(Identity {
+        model: get("device.product_name"),
+        serial: get("device.unique_id"),
+        hostname: get("ip.hostname").or_else(|| get("device.friendly_name")),
+        ip_addr: get("interface.network.active.ip_addr"),
+    })
+}
+
+#[tauri::command]
 fn diagnose_checks() -> Vec<diagnose::CheckInfo> {
     diagnose::catalogue()
 }
@@ -307,6 +389,7 @@ pub fn run() {
                 Err(e) => *state.profiles_error.lock().unwrap() = Some(e),
             }
             *state.settings.lock().unwrap() = settings::load(app.handle());
+            *state.recent.lock().unwrap() = recent::load(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -320,6 +403,10 @@ pub fn run() {
             printer_settings,
             printer_action,
             printer_calibrate,
+            recent_printers,
+            remember_printer,
+            forget_printer,
+            identify,
             diagnose_checks,
             run_diagnostics,
             apply_fix,

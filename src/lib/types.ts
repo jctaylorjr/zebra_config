@@ -115,3 +115,27 @@ export type LogLine = {
 };
 
 export const diagnoseHref = (ip: string) => `/diagnose?ip=${encodeURIComponent(ip)}`;
+
+// printers opened on the Printer or Diagnose page; see src-tauri/src/recent.rs
+export type Recent = {
+	address: string; // as last entered
+	model: string | null;
+	serial: string | null;
+	hostname: string | null;
+	ip_addr: string | null;
+	last_used: number; // seconds since 1970
+};
+
+export type Identity = {
+	model: string | null;
+	serial: string | null;
+	hostname: string | null;
+	ip_addr: string | null;
+};
+
+// "CSCXYZ123 (192.0.2.5) · ZD621", for menus
+export const recentLabel = (r: Recent) => {
+	const name = r.hostname ?? r.address;
+	const also = name.toLowerCase() === r.address.toLowerCase() ? '' : ` (${r.address})`;
+	return `${name}${also}${r.model ? ` · ${r.model}` : ''}`;
+};

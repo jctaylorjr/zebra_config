@@ -4,14 +4,19 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen } from '@tauri-apps/api/event';
 	import { confirm } from '@tauri-apps/plugin-dialog';
+	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { onMount, untrack } from 'svelte';
+	import RecentPrinters from '$lib/RecentPrinters.svelte';
+	import { copy } from '$lib/clipboard';
 	import { picks } from '$lib/configure.svelte';
 	import { printerPage, viewFor } from '$lib/printer.svelte';
+	import { recent, remember } from '$lib/recent.svelte';
 	import {
 		diagnoseHref,
 		fits,
 		folderFor,
 		printerHref,
+		recentLabel,
 		statusText,
 		type Details,
 		type FolderView,
@@ -142,7 +147,7 @@
 		untrack(() => {
 			printerPage.ip = ip;
 			const first = !printerPage.views[ip];
-			viewFor(ip);
+			viewFor(ip).unrecorded = true;
 			refresh(ip);
 			if (first) loadAll(ip);
 		});
@@ -172,6 +177,21 @@
 			view.updated = new Date().toLocaleTimeString();
 		} catch (e) {
 			view.detailsError = String(e);
+			return;
+		}
+		// recorded once the printer has answered, so a mistyped address doesn't end up there
+		if (view.unrecorded) {
+			view.unrecorded = false;
+			const text = (k: string) => {
+				const x = view.details?.values[k];
+				return typeof x === 'string' && x.trim() ? x.trim() : null;
+			};
+			remember(target, {
+				model: text('device.product_name'),
+				serial: text('device.unique_id'),
+				hostname: text('ip.hostname') ?? text('device.friendly_name'),
+				ipAddr: text('interface.network.active.ip_addr')
+			});
 		}
 	}
 
@@ -303,15 +323,57 @@
 	function open(target: string) {
 		if (target.trim()) goto(printerHref(target.trim()));
 	}
+
+	// the hostname, with the IP address beside it once the printer has answered
+	const value = (k: string) => {
+		const x = v?.details?.values[k];
+		return typeof x === 'string' ? x.trim() : '';
+	};
+	let name = $derived(value('ip.hostname') || value('device.friendly_name') || ip);
+	let address = $derived(value('interface.network.active.ip_addr'));
+	let heading = $derived(address && address !== name ? `${name} (${address})` : name);
+
+	let recentOthers = $derived(
+		recent.list.filter(
+			(r) => !printerPage.printers.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
+		)
+	);
+
+	function copyBlock(g: (typeof groups)[number]) {
+		const lines = g.rows.map(
+			([label, key]) => `${label}: ${v?.details ? show(key, v.details.values[key]) : ''}`
+		);
+		copy([`${g.title} — ${heading}`, ...lines].join('\n'), g.title.toLowerCase());
+	}
+
+	// only what the filter shows
+	function copySettings() {
+		const filter = v?.filter.trim();
+		const head = `All settings — ${heading}${filter ? ` (filtered by "${filter}")` : ''}`;
+		const lines = shown.map((s) => `${s.key}: ${s.value}`);
+		copy([head, ...lines].join('\n'), `${shown.length} ${shown.length === 1 ? 'setting' : 'settings'}`);
+	}
 </script>
 
 <div class="top">
-	<h1>{ip || 'Printer'}</h1>
+	<h1>
+		{ip ? name : 'Printer'}
+		{#if ip && address && address !== name}<span class="address">{address}</span>{/if}
+	</h1>
 	<select value={ip} onchange={(e) => open(e.currentTarget.value)}>
 		<option value="" disabled>Choose a printer…</option>
-		{#each printerPage.printers as p}
-			<option value={p.ip}>{p.ip}{p.model ? ` (${p.model})` : ''}</option>
-		{/each}
+		{#if printerPage.printers.length}
+			<optgroup label="Configure list">
+				{#each printerPage.printers as p}
+					<option value={p.ip}>{p.ip}{p.model ? ` · ${p.model}` : ''}</option>
+				{/each}
+			</optgroup>
+		{/if}
+		{#if recentOthers.length}
+			<optgroup label="Recent">
+				{#each recentOthers as r}<option value={r.address}>{recentLabel(r)}</option>{/each}
+			</optgroup>
+		{/if}
 	</select>
 	<form
 		onsubmit={(e) => {
@@ -322,13 +384,19 @@
 		<input bind:value={printerPage.typed} placeholder="or another IP / hostname" />
 		<button type="submit" disabled={!printerPage.typed.trim()}>Open</button>
 	</form>
-	{#if ip}<a class="button" href={diagnoseHref(ip)}>Diagnose</a>{/if}
+	{#if ip}
+		<a class="button" href={diagnoseHref(ip)}>Diagnose</a>
+		<button onclick={() => openUrl(`http://${ip}`)} title="The printer's own web page"
+			>Print server page ↗</button
+		>
+	{/if}
 </div>
 
 {#if !ip}
 	<p class="muted">
 		Choose a printer, or open one from the Configure page by clicking its address.
 	</p>
+	<RecentPrinters hrefFor={printerHref} />
 {:else if v}
 	<div class="bar">
 		{#if v.details}
@@ -418,7 +486,10 @@
 
 		{#each groups as g}
 			<section class="card">
-				<h2>{g.title}</h2>
+				<div class="card-head">
+					<h2>{g.title}</h2>
+					<button class="copy" disabled={!v.details} onclick={() => copyBlock(g)}>Copy</button>
+				</div>
 				<dl>
 					{#each g.rows as [label, key]}
 						<dt title={key}>{label}</dt>
@@ -469,7 +540,12 @@
 			<button onclick={() => loadAll(ip)} disabled={v.allLoading}
 				>{v.allLoading ? 'Reading…' : 'Reload'}</button
 			>
-			{#if v.all}<span class="muted">{shown.length} of {v.all.length}</span>{/if}
+			{#if v.all}
+				<span class="muted">{shown.length} of {v.all.length}</span>
+				<button class="copy" disabled={shown.length === 0} onclick={copySettings}
+					>Copy {v.filter.trim() ? 'filtered' : 'all'}</button
+				>
+			{/if}
 		</div>
 		{#if v.allError}
 			<p class="error">{v.allError}</p>
@@ -504,6 +580,24 @@
 	}
 	.top h1 {
 		margin: 0 8px 0 0;
+	}
+	.address {
+		font-weight: 400;
+		color: var(--muted);
+		margin-left: 8px;
+	}
+	.card-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 8px;
+	}
+	.card-head h2 {
+		margin: 0;
+	}
+	button.copy {
+		padding: 2px 10px;
+		font-size: 12px;
 	}
 	.top form,
 	.raw {

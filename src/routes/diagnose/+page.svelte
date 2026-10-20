@@ -5,18 +5,23 @@
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { onMount, tick, untrack } from 'svelte';
+	import RecentPrinters from '$lib/RecentPrinters.svelte';
+	import { copy } from '$lib/clipboard';
 	import {
 		applyFix,
 		diagnosePage,
 		diagnosisFor,
+		identify,
 		loadChecks,
 		picked,
 		runDiagnosis
 	} from '$lib/diagnose.svelte';
+	import { recent } from '$lib/recent.svelte';
 	import {
 		diagnoseHref,
 		fits,
 		printerHref,
+		recentLabel,
 		type Finding,
 		type LogLine,
 		type Printer,
@@ -43,6 +48,7 @@
 		untrack(() => {
 			diagnosePage.ip = ip;
 			diagnosisFor(ip);
+			identify(ip);
 		});
 	});
 
@@ -132,17 +138,37 @@
 	const prompt = (l: LogLine) => marks[l.kind] ?? '';
 
 	function copyLog() {
-		navigator.clipboard.writeText((d?.log ?? []).map((l) => prompt(l) + l.text).join('\n'));
+		copy((d?.log ?? []).map((l) => prompt(l) + l.text).join('\n'), 'the log');
 	}
+
+	let name = $derived(d?.identity?.hostname ?? ip);
+	let address = $derived(d?.identity?.ip_addr ?? '');
+	let recentOthers = $derived(
+		recent.list.filter(
+			(r) => !diagnosePage.printers.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
+		)
+	);
 </script>
 
 <div class="top">
-	<h1>Diagnose{ip ? ` ${ip}` : ''}</h1>
+	<h1>
+		Diagnose{ip ? ` ${name}` : ''}
+		{#if ip && address && address !== name}<span class="address">{address}</span>{/if}
+	</h1>
 	<select value={ip} onchange={(e) => open(e.currentTarget.value)}>
 		<option value="" disabled>Choose a printer…</option>
-		{#each diagnosePage.printers as p}
-			<option value={p.ip}>{p.ip}{p.model ? ` (${p.model})` : ''}</option>
-		{/each}
+		{#if diagnosePage.printers.length}
+			<optgroup label="Configure list">
+				{#each diagnosePage.printers as p}
+					<option value={p.ip}>{p.ip}{p.model ? ` · ${p.model}` : ''}</option>
+				{/each}
+			</optgroup>
+		{/if}
+		{#if recentOthers.length}
+			<optgroup label="Recent">
+				{#each recentOthers as r}<option value={r.address}>{recentLabel(r)}</option>{/each}
+			</optgroup>
+		{/if}
 	</select>
 	<form
 		onsubmit={(e) => {
@@ -158,6 +184,7 @@
 
 {#if !ip}
 	<p class="muted">Choose a printer to diagnose, or open one from its Printer page.</p>
+	<RecentPrinters hrefFor={diagnoseHref} />
 {:else if d}
 	<section class="card">
 		<div class="row">
@@ -298,6 +325,11 @@
 	}
 	.top h1 {
 		margin: 0 8px 0 0;
+	}
+	.address {
+		font-weight: 400;
+		color: var(--muted);
+		margin-left: 8px;
 	}
 	.top form {
 		display: flex;

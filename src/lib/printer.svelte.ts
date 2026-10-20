@@ -20,6 +20,7 @@ export type PrinterView = {
 	calNote: string;
 	calError: string;
 	setupError: string;
+	unrecorded: boolean; // opened, but not yet added to the recent printers
 };
 
 // the Printer page, kept while visiting other pages
@@ -54,7 +55,8 @@ export function viewFor(ip: string): PrinterView {
 		calBusy: false,
 		calNote: '',
 		calError: '',
-		setupError: ''
+		setupError: '',
+		unrecorded: true
 	};
 	return printerPage.views[ip];
 }

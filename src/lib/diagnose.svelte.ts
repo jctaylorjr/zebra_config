@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { SvelteSet } from 'svelte/reactivity';
-import type { CheckInfo, Finding, LogLine, Printer, Profile } from './types';
+import { remember } from './recent.svelte';
+import type { CheckInfo, Finding, Identity, LogLine, Printer, Profile } from './types';
 
 // one printer's diagnosis
 export type Diagnosis = {
+	identity: Identity | null; // read when the printer is opened, for the title
 	profileId: string | null; // null until chosen: the printer's own profile
 	running: boolean;
 	run: number; // tags the latest run's log lines
@@ -48,6 +50,7 @@ export async function loadChecks() {
 // a printer's diagnosis, made the first time it's opened; for effects and event handlers
 export function diagnosisFor(ip: string): Diagnosis {
 	diagnosePage.runs[ip] ??= {
+		identity: null,
 		profileId: null,
 		running: false,
 		run: 0,
@@ -57,6 +60,18 @@ export function diagnosisFor(ip: string): Diagnosis {
 		error: ''
 	};
 	return diagnosePage.runs[ip];
+}
+
+// reads who the printer is for the title, and adds it to the recent printers once it answers
+export async function identify(ip: string) {
+	const d = diagnosisFor(ip);
+	try {
+		const who = await invoke<Identity>('identify', { ip });
+		d.identity = who;
+		remember(ip, { ...who, ipAddr: who.ip_addr });
+	} catch {
+		// unreachable for now; the diagnosis says so when it runs
+	}
 }
 
 export async function runDiagnosis(ip: string, profileId: string) {

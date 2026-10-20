@@ -10,7 +10,8 @@ The app has three pages, picked from the bar on the left:
   never scans the network.
 - **Printer** — one printer's alerts, status, network, media and counters, every setting it reports,
   and commands such as calibrate (choosing gap/notch, black mark, continuous or auto-detect), feed,
-  print the configuration label, pause and restart. Profiles can be applied from here too.
+  print the configuration label, pause and restart. Profiles can be applied from here too, each
+  block of details copies to the clipboard, and the printer's own web page opens in the browser.
 - **Diagnose** — runs chosen checks on one printer and lists what's wrong, with fixes to apply and
   links to Zebra's guides. Read-only checks cover errors and warnings, printer state, the
   printhead, media settings and sensor, profile settings, memory, network, weblink, the clock,
@@ -40,9 +41,11 @@ Unreachable printers are retried with backoff.
 
 ## Settings
 
-Stored in the app data folder (`~/.local/share/com.jt1280.zebra_configure` on Linux):
+Stored in the app data folder (`%APPDATA%\com.jt1280.zebra_configure` on Windows,
+`~/.local/share/com.jt1280.zebra_configure` on Linux):
 
 - `settings.json` — Zebra folders per model family and their firmware versions. Edited in the app.
+- `recent.json` — the last 20 printers opened on the Printer and Diagnose pages.
 - `profiles.json` — profiles. Edited in the app; it won't save over a file it couldn't read. Example:
 
 ```json
