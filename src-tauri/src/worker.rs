@@ -3,7 +3,16 @@ use crate::{
     model::{Printer, Profile, Status},
     printer, settings, setup, usb,
 };
-use std::{collections::HashMap, path::Path, time::Duration};
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub enum ApplyError {
@@ -34,27 +43,86 @@ pub fn set_status(app: &AppHandle, ip: &str, status: Status) {
     update(app, ip, |p| p.status = status);
 }
 
+#[derive(Serialize, Clone)]
+struct Moved {
+    from: String,
+    printer: Printer,
+}
+
+// the printer answered at another address after a restart, so it's listed there from now on
+fn moved(app: &AppHandle, from: &str, to: &str) {
+    let state = app.state::<AppState>();
+    let p = {
+        let mut printers = state.printers.lock().unwrap();
+        let Some(mut p) = printers.remove(from) else {
+            return;
+        };
+        p.ip = to.to_string();
+        printers.insert(to.to_string(), p.clone());
+        p
+    };
+    {
+        let mut tasks = state.tasks.lock().unwrap();
+        if let Some(task) = tasks.remove(from) {
+            tasks.insert(to.to_string(), task);
+        }
+    }
+    let _ = app.emit(
+        "printer-moved",
+        Moved {
+            from: from.to_string(),
+            printer: p,
+        },
+    );
+    crate::tray::update(app);
+}
+
 pub async fn apply_with_retry(
     app: AppHandle,
     ip: String,
     profile: Profile,
     folder: Option<settings::Folder>,
 ) {
-    let report = |s: Status| set_status(&app, &ip, s);
+    // where the printer is now; a restart can move it, e.g. firmware that renames it
+    let at = Mutex::new(ip);
+    let report = |s: Status| set_status(&app, &at.lock().unwrap(), s);
+    let follow = |to: &str| moved(&app, &at.lock().unwrap(), to);
+    let done = retry(&at, &profile, folder.as_ref(), &report, &follow).await;
+    if matches!(done, Status::Applied(_)) {
+        let ip = at.lock().unwrap().clone();
+        if let Ok(name) = firmware_name(&ip).await {
+            update(&app, &ip, |p| p.firmware = Some(name));
+        }
+    }
+    report(done);
+}
+
+// applies until it works or can't, backing off while the printer can't be reached. `at` is
+// where the printer is; when a restart moves it, `follow` is told before `at` changes
+async fn retry(
+    at: &Mutex<String>,
+    profile: &Profile,
+    folder: Option<&settings::Folder>,
+    report: &(dyn Fn(Status) + Sync),
+    follow: &(dyn Fn(&str) + Sync),
+) -> Status {
+    let follow = |to: &str| {
+        follow(to);
+        *at.lock().unwrap() = to.to_string();
+    };
+    // without a known firmware version every attempt would install it again, restarting the
+    // printer each time, so it's only installed once
+    let flashed = AtomicBool::new(false);
     let mut attempt = 0u32;
     let mut delay = 5u64;
     loop {
         attempt += 1;
         report(Status::Applying("Connecting".into()));
-        match apply_once(&ip, &profile, folder.as_ref(), &report).await {
-            Ok(checked) => {
-                if let Ok(name) = firmware_name(&ip).await {
-                    update(&app, &ip, |p| p.firmware = Some(name));
-                }
-                return report(Status::Applied(checked));
-            }
-            Err(ApplyError::Mismatch(m)) => return report(Status::Failed(m)),
-            Err(ApplyError::Unverified(m)) => return report(Status::Unverified(m)),
+        let ip = at.lock().unwrap().clone();
+        match apply_once(&ip, profile, folder, &flashed, report, &follow).await {
+            Ok(checked) => return Status::Applied(checked),
+            Err(ApplyError::Mismatch(m)) => return Status::Failed(m),
+            Err(ApplyError::Unverified(m)) => return Status::Unverified(m),
             Err(ApplyError::Unreachable(reason)) => {
                 report(Status::Offline {
                     attempt,
@@ -62,38 +130,34 @@ pub async fn apply_with_retry(
                     reason,
                 });
                 tokio::time::sleep(Duration::from_secs(delay)).await;
-                delay = (delay * 2).min(600); // back off, cap at 10 min
+                delay = (delay * 2).min(20); // back off, cap at 20 s
             }
         }
     }
 }
 
-// same order as a USB stick: firmware, files, commands; then the profile's own settings.
-// returns what was checked
-async fn apply_once(
-    ip: &str,
-    p: &Profile,
-    folder: Option<&settings::Folder>,
-    report: &(dyn Fn(Status) + Sync),
-) -> Result<String, ApplyError> {
+// what a profile sends to one printer, which depends on the printer and its firmware
+struct Plan {
+    serial: String,
+    firmware: String, // appl.name
+    skipped: Vec<setup::Setting>, // settings the printer doesn't have
+    extra: Vec<String>,
+    label: Option<String>, // the test label
+    names: Vec<String>,    // hostnames it may answer to after a restart
+}
+
+async fn read_plan(ip: &str, p: &Profile) -> Result<Plan, ApplyError> {
     let unreachable = |e: anyhow::Error| ApplyError::Unreachable(e.to_string());
-    let step = |s: &str| report(Status::Applying(s.into()));
-
-    let usb = match folder.and_then(|f| f.path.as_deref()) {
-        Some(path) => usb::load(Path::new(path))
-            .map_err(|e| ApplyError::Mismatch(format!("can't read {path}: {e}")))?,
-        None => usb::Folder::default(),
-    };
-
-    // worked out first, so a profile that doesn't fit the printer stops before anything is sent
     let got = printer::query(
         ip,
         &[
             "head.resolution.in_dpi",
             "device.product_name",
             "device.unique_id",
+            "device.friendly_name",
             "ip.hostname",
             "print.tone_zpl",
+            "appl.name",
         ],
     )
     .await
@@ -144,38 +208,131 @@ async fn apply_once(
         None => None,
     };
 
+    let names = restart_names(
+        &[get("ip.hostname"), get("device.friendly_name")],
+        &get("device.product_name"),
+        &target.serial,
+        &kept,
+    );
+    Ok(Plan {
+        firmware: got["appl.name"].as_str().unwrap_or("").to_string(),
+        serial: target.serial,
+        skipped,
+        extra,
+        label,
+        names,
+    })
+}
+
+// the hostnames a printer may answer to after a restart: the ones it has, {model}-{serial} as
+// Link-OS 7.6 firmware names it, its serial, which older firmware uses until it's named, and
+// the one the profile sets, which takes effect then
+fn restart_names(
+    current: &[String],
+    product: &str,
+    serial: &str,
+    kept: &[setup::Setting],
+) -> Vec<String> {
+    let default_name = match product.is_empty() || serial.is_empty() {
+        true => String::new(),
+        false => format!("{product}-{serial}"),
+    };
+    let set = kept
+        .iter()
+        .filter(|s| s.key == "ip.hostname" || s.key == "device.friendly_name")
+        .map(|s| s.value.clone());
+    let mut names: Vec<String> = vec![];
+    for name in current
+        .iter()
+        .cloned()
+        .chain([default_name, serial.to_string()])
+        .chain(set)
+    {
+        if !name.is_empty() && !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+// same order as a USB stick: firmware, files, commands; then the profile's own settings.
+// returns what was checked
+async fn apply_once(
+    ip: &str,
+    p: &Profile,
+    folder: Option<&settings::Folder>,
+    flashed: &AtomicBool, // the firmware was installed by an earlier attempt
+    report: &(dyn Fn(Status) + Sync),
+    follow: &(dyn Fn(&str) + Sync), // the printer came back at another address
+) -> Result<String, ApplyError> {
+    let unreachable = |e: anyhow::Error| ApplyError::Unreachable(e.to_string());
+    let step = |s: &str| report(Status::Applying(s.into()));
+
+    let usb = match folder.and_then(|f| f.path.as_deref()) {
+        Some(path) => usb::load(Path::new(path))
+            .map_err(|e| ApplyError::Mismatch(format!("can't read {path}: {e}")))?,
+        None => usb::Folder::default(),
+    };
+
+    // worked out first, so a profile that doesn't fit the printer stops before anything is sent
+    let mut ip = ip.to_string();
+    let mut plan = read_plan(&ip, p).await?;
+
     let mut checked = vec![];
-    if let Some(firmware) = &usb.firmware {
-        let want = folder.and_then(|f| f.firmware_version.as_deref());
-        let current = firmware_name(ip).await.map_err(unreachable)?;
-        if want != Some(current.as_str()) {
+    if let Some((file, firmware)) = usb
+        .firmware
+        .as_ref()
+        .filter(|_| !flashed.load(Ordering::Relaxed))
+    {
+        // as set for the folder, or else going by the file's name, as a USB mirror does
+        let set = folder.and_then(|f| f.firmware_version.as_deref());
+        let want = set.unwrap_or(usb::firmware_version(file));
+        if plan.firmware != want {
             step("Installing firmware");
-            printer::send(ip, firmware).await.map_err(unreachable)?;
+            printer::send(&ip, firmware).await.map_err(unreachable)?;
+            flashed.store(true, Ordering::Relaxed);
             step("Waiting for restart");
-            if !wait_for_restart(ip, want).await {
-                return Err(ApplyError::Mismatch(match want {
-                    Some(v) => format!("printer did not report firmware {v} within 20 min"),
-                    None => "printer did not restart within 20 min of the firmware download".into(),
+            // only a version that's set has to be reported, since a file can be named anything
+            let Some(at) = wait_for_restart(&ip, &plan.serial, &plan.names, set).await else {
+                let looked = looked_at(&ip, &plan.names);
+                return Err(ApplyError::Mismatch(match set {
+                    Some(v) => format!("printer did not report firmware {v} within 20 min; {looked}"),
+                    None => format!(
+                        "printer did not restart within 20 min of the firmware download; {looked}"
+                    ),
                 }));
+            };
+            if at != ip {
+                follow(&at);
+                ip = at;
             }
-            checked.push("firmware installed".to_string());
+            // new firmware can have settings the old one didn't, e.g. ip.hostname from 7.6
+            plan = read_plan(&ip, p).await?;
+            checked.push(match plan.firmware == want {
+                true => format!("firmware {want} installed"),
+                // otherwise every apply installs it again
+                false => format!(
+                    "firmware installed, but it reports {0}, so set {0} as the folder's firmware version",
+                    plan.firmware
+                ),
+            });
         }
     }
 
     if !usb.files.is_empty() {
         step("Sending files");
         for (name, data) in &usb.files {
-            printer::send_file(ip, name, data)
+            printer::send_file(&ip, name, data)
                 .await
                 .map_err(unreachable)?;
         }
     }
 
     let mut commands: Vec<&[u8]> = usb.commands.iter().map(|(_, d)| d.as_slice()).collect();
-    let extra = if extra.is_empty() {
+    let extra = if plan.extra.is_empty() {
         String::new()
     } else {
-        extra.join("\r\n") + "\r\n"
+        plan.extra.join("\r\n") + "\r\n"
     };
     if !extra.is_empty() {
         commands.push(extra.as_bytes());
@@ -184,7 +341,7 @@ async fn apply_once(
         step("Sending commands");
     }
     for (i, data) in commands.iter().enumerate() {
-        if let Err(e) = printer::send(ip, data).await {
+        if let Err(e) = printer::send(&ip, data).await {
             // an earlier command may have moved the printer to another network
             return Err(if i == 0 {
                 unreachable(e)
@@ -194,10 +351,15 @@ async fn apply_once(
         }
         if resets_printer(data) {
             step("Waiting for restart");
-            if !wait_for_restart(ip, None).await {
-                return Err(ApplyError::Unverified(
-                    "printer did not come back after a command file reset it".into(),
-                ));
+            let Some(at) = wait_for_restart(&ip, &plan.serial, &plan.names, None).await else {
+                return Err(ApplyError::Unverified(format!(
+                    "printer did not come back after a command file reset it; {}",
+                    looked_at(&ip, &plan.names)
+                )));
+            };
+            if at != ip {
+                follow(&at);
+                ip = at;
             }
         }
     }
@@ -217,7 +379,7 @@ async fn apply_once(
     let expected = expected_settings(&text);
     if !expected.is_empty() {
         let keys: Vec<&str> = expected.iter().map(|(k, _)| k.as_str()).collect();
-        let got = printer::query(ip, &keys).await.map_err(stopped)?;
+        let got = printer::query(&ip, &keys).await.map_err(stopped)?;
         let bad: Vec<&str> = expected
             .iter()
             .filter(|(k, v)| {
@@ -245,7 +407,7 @@ async fn apply_once(
             .iter()
             .map(|(n, d)| (n.to_uppercase(), d.len() as u64))
             .collect();
-        let on_printer = printer::files(ip).await.map_err(stopped)?;
+        let on_printer = printer::files(&ip).await.map_err(stopped)?;
         let missing: Vec<&str> = want
             .iter()
             .filter(|n| match on_printer.get(*n) {
@@ -263,12 +425,12 @@ async fn apply_once(
         checked.push(format!("{} on E:", want.join(", ")));
     }
 
-    if !skipped.is_empty() {
-        let keys: Vec<&str> = skipped.iter().map(|s| s.key.as_str()).collect();
+    if !plan.skipped.is_empty() {
+        let keys: Vec<&str> = plan.skipped.iter().map(|s| s.key.as_str()).collect();
         checked.push(format!("skipped {} it doesn't have", keys.join(", ")));
     }
-    if let Some(label) = label {
-        checked.push(calibrate_and_print(ip, &label, &step).await?);
+    if let Some(label) = &plan.label {
+        checked.push(calibrate_and_print(&ip, label, &step).await?);
     }
 
     Ok(if checked.is_empty() {
@@ -342,7 +504,7 @@ pub async fn recover(ip: &str, step: &(dyn Fn(&str) + Sync)) -> Result<(), Apply
         |e: anyhow::Error| ApplyError::Unverified(format!("printer stopped answering: {e}"));
     step("Clearing printer error");
     printer::send(ip, b"~JA~JR").await.map_err(stopped)?;
-    if !wait_for_restart(ip, None).await {
+    if wait_for_restart(ip, "", &[], None).await.is_none() {
         return Err(ApplyError::Unverified(
             "printer did not come back after resetting it to clear an error".into(),
         ));
@@ -358,19 +520,88 @@ async fn firmware_name(ip: &str) -> anyhow::Result<String> {
 }
 
 // with a known firmware version, wait until the printer reports it; otherwise wait for it
-// to drop off the network and come back. false after 20 min
-async fn wait_for_restart(ip: &str, want: Option<&str>) -> bool {
+// to drop off the network and come back. a restart can give it a new address, e.g. Link-OS 7.6
+// renames it and can switch it to wireless, so with its serial known it's also looked for by
+// hostname, and only taken where it answers with that serial. returns the address it answered
+// at, or none after 20 min
+async fn wait_for_restart(
+    ip: &str,
+    serial: &str,
+    names: &[String],
+    want: Option<&str>,
+) -> Option<String> {
+    let names = if serial.is_empty() { &[] } else { names };
+    let start = Instant::now();
     let mut went_down = false;
-    for _ in 0..120 {
+    // where it answered as back on the last check. it has to answer twice in a row, since a
+    // printer that has just started can stop answering again while it finishes, e.g. after new
+    // firmware
+    let mut seen: Option<String> = None;
+    while start.elapsed() < Duration::from_secs(20 * 60) {
         tokio::time::sleep(Duration::from_secs(10)).await;
-        match firmware_name(ip).await {
-            Ok(name) if want == Some(name.as_str()) => return true,
-            Ok(_) if want.is_none() && went_down => return true,
-            Ok(_) => {}
-            Err(_) => went_down = true,
+        let mut answered = None;
+        let addresses = std::iter::once(ip).chain(names.iter().map(String::as_str));
+        for (i, addr) in addresses.enumerate() {
+            // DHCP can hand the old address to another printer
+            let got = printer::query(addr, &["device.unique_id", "appl.name", "device.uptime"])
+                .await
+                .ok()
+                .filter(|got| {
+                    serial.is_empty() || got["device.unique_id"].as_str().map(str::trim) == Some(serial)
+                });
+            let Some(got) = got else {
+                went_down |= i == 0;
+                continue;
+            };
+            // a printer busy writing firmware can stop answering for a while without restarting,
+            // so it has restarted once it's been on for less time than this wait. one without
+            // device.uptime has to be seen going down instead
+            let restarted = match got["device.uptime"].as_str().and_then(parse_uptime) {
+                Some(up) => up < start.elapsed(),
+                None => went_down,
+            };
+            let back = match want {
+                Some(v) => got["appl.name"].as_str() == Some(v),
+                None => restarted,
+            };
+            if back {
+                answered = Some(addr);
+                break;
+            }
+        }
+        match answered {
+            Some(addr) if seen.as_deref() == Some(addr) => return Some(addr.to_string()),
+            other => seen = other.map(String::from),
         }
     }
-    false
+    None
+}
+
+// how long the printer has been on, from device.uptime, e.g. "00 days 00 hours 09 mins 34 secs"
+fn parse_uptime(text: &str) -> Option<Duration> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() || words.len() % 2 != 0 {
+        return None;
+    }
+    let mut secs = 0u64;
+    for pair in words.chunks(2) {
+        let n: u64 = pair[0].parse().ok()?;
+        secs += n * match pair[1].trim_end_matches('s') {
+            "day" => 86400,
+            "hour" => 3600,
+            "min" => 60,
+            "sec" => 1,
+            _ => return None,
+        };
+    }
+    Some(Duration::from_secs(secs))
+}
+
+fn looked_at(ip: &str, names: &[String]) -> String {
+    let all: Vec<&str> = std::iter::once(ip)
+        .chain(names.iter().map(String::as_str))
+        .collect();
+    format!("looked for it at {}", all.join(", "))
 }
 
 // a command file can end by resetting the printer, e.g. {}{"device.reset" : ""} or ~JR
@@ -455,6 +686,32 @@ mod tests {
     }
 
     #[test]
+    fn looks_for_a_restarted_printer_by_every_name_it_may_have() {
+        let set = |key: &str, value: &str| setup::Setting {
+            label: "",
+            key: key.into(),
+            value: value.into(),
+        };
+        // a ZD611 on 7.5 named by its friendly name, getting a profile that renames it
+        let names = restart_names(
+            &["".into(), "zd611-dgn260506510".into()],
+            "ZD611",
+            "DGN260506510",
+            &[
+                set("ip.hostname", "CSCDGN260506510"),
+                set("device.friendly_name", "CSCDGN260506510"),
+                set("print.tone_zpl", "25.0"),
+            ],
+        );
+        assert_eq!(
+            names,
+            ["zd611-dgn260506510", "DGN260506510", "CSCDGN260506510"]
+        );
+        // without a serial there's no default name to guess
+        assert!(restart_names(&[], "ZD611", "", &[]).is_empty());
+    }
+
+    #[test]
     fn spots_command_files_that_reset_the_printer() {
         assert!(resets_printer(
             b"{}{\"file.cert.weblink1.ca_file\":\"CA.cer\"}{}{\"device.reset\" : \"\"}"
@@ -469,7 +726,23 @@ mod tests {
         ));
     }
 
-    // talks to a real printer, so it only runs when asked. both env vars after the IP are optional:
+    #[test]
+    fn reads_uptime() {
+        assert_eq!(
+            parse_uptime("00 days 00 hours 09 mins 34 secs"),
+            Some(Duration::from_secs(9 * 60 + 34))
+        );
+        assert_eq!(
+            parse_uptime("2 days 1 hour 0 mins 1 sec"),
+            Some(Duration::from_secs(2 * 86400 + 3600 + 1))
+        );
+        assert_eq!(parse_uptime(""), None);
+        assert_eq!(parse_uptime("?"), None);
+        assert_eq!(parse_uptime("09 mins 34"), None);
+    }
+
+    // talks to a real printer, so it only runs when asked, and retries as the app does. both env
+    // vars after the IP are optional:
     // ZEBRA_TEST_IP=192.168.1.50 ZEBRA_TEST_FOLDER=/path/to/Zebra ZEBRA_TEST_PROFILE='{...profile json...}' \
     //   cargo test -- --ignored --nocapture
     #[tokio::test]
@@ -495,10 +768,16 @@ mod tests {
                 media: None,
                 commands: vec![],
             });
-        let report = |s: Status| println!("{}", serde_json::to_string(&s).unwrap());
-        match apply_once(&ip, &p, folder.as_ref(), &report).await {
-            Ok(checked) => println!("applied: {checked}"),
-            Err(e) => panic!("{}", e.into_message()),
-        }
+        let start = Instant::now();
+        let log = |s: &str| println!("{:>5}s {s}", start.elapsed().as_secs());
+        log(&format!("firmware before: {:?}", firmware_name(&ip).await.ok()));
+        let at = Mutex::new(ip);
+        let report = |s: Status| log(&serde_json::to_string(&s).unwrap());
+        let follow = |to: &str| log(&format!("moved to {to}"));
+        let done = retry(&at, &p, folder.as_ref(), &report, &follow).await;
+        report(done.clone());
+        let ip = at.lock().unwrap().clone();
+        log(&format!("firmware after: {:?} at {ip}", firmware_name(&ip).await.ok()));
+        assert!(matches!(done, Status::Applied(_)));
     }
 }

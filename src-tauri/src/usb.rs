@@ -7,7 +7,7 @@ use std::{
 // the contents of a USB mirror "Zebra" folder, which the printer would process in this order
 #[derive(Default)]
 pub struct Folder {
-    pub firmware: Option<Vec<u8>>,        // appl/
+    pub firmware: Option<(String, Vec<u8>)>, // appl/
     pub files: Vec<(String, Vec<u8>)>,    // files/, stored on E:
     pub commands: Vec<(String, Vec<u8>)>, // commands/, run in filename order
 }
@@ -17,6 +17,7 @@ pub struct Folder {
 pub struct Summary {
     pub path: String,
     pub firmware: Option<String>,
+    pub installs: Option<String>, // the appl.name the firmware installs, going by its file name
     pub files: usize,
     pub commands: usize,
     pub checks: Vec<String>, // files that should be on E: afterwards
@@ -30,7 +31,7 @@ pub fn load(root: &Path) -> io::Result<Folder> {
         return Err(io::Error::other("appl/ has more than one firmware file"));
     }
     Ok(Folder {
-        firmware: appl.pop().map(|(_, data)| data),
+        firmware: appl.pop(),
         files: read_dir(&root.join("files"))?,
         commands: read_dir(&root.join("commands"))?,
     })
@@ -49,6 +50,7 @@ pub fn summary(root: &Path) -> Summary {
         Ok(Summary {
             path: path.clone(),
             firmware: appl.first().map(|(n, _)| n.clone()),
+            installs: appl.first().map(|(n, _)| firmware_version(n).to_string()),
             files: files.len(),
             commands: commands.len(),
             checks: expected_files(&names, &commands),
@@ -58,11 +60,24 @@ pub fn summary(root: &Path) -> Summary {
     result.unwrap_or_else(|e| Summary {
         path,
         firmware: None,
+        installs: None,
         files: 0,
         commands: 0,
         checks: vec![],
         error: Some(e.to_string()),
     })
+}
+
+// the appl.name a firmware file installs, going by its name as a printer does with a USB
+// mirror's appl/ folder: SP93-006783B.zpl installs SP93-006783B
+pub fn firmware_version(file_name: &str) -> &str {
+    match file_name.rsplit_once('.') {
+        // an extension, unlike the end of a version such as V93.21.49Z, has no digits
+        Some((stem, ext)) if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphabetic()) => {
+            stem
+        }
+        _ => file_name,
+    }
 }
 
 // what should be on E: once the folder is applied: its files/ plus anything a command file
@@ -158,6 +173,13 @@ mod tests {
         assert!(summary(&root.join("missing")).error.is_some());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn firmware_is_named_by_its_file() {
+        assert_eq!(firmware_version("SP93-006783B.zpl"), "SP93-006783B");
+        assert_eq!(firmware_version("V93.21.49Z.zpl"), "V93.21.49Z");
+        assert_eq!(firmware_version("V93.21.49Z"), "V93.21.49Z");
     }
 
     #[test]

@@ -1,6 +1,9 @@
-use crate::model;
+use crate::{model, usb};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Manager};
 
 // changed from the GUI: the Zebra folders and the app's preferences
@@ -29,6 +32,16 @@ pub struct Folder {
     pub path: Option<String>,
     #[serde(default)]
     pub firmware_version: Option<String>, // appl.name its firmware installs; printers already on it are skipped
+}
+
+impl Folder {
+    // the appl.name its firmware installs: as set, or else going by the firmware file's name
+    pub fn firmware(&self) -> Option<String> {
+        if let Some(v) = &self.firmware_version {
+            return Some(v.clone());
+        }
+        usb::summary(Path::new(self.path.as_deref()?)).installs
+    }
 }
 
 impl Default for Settings {

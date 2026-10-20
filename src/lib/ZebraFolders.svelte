@@ -11,6 +11,7 @@
 	let error = $state('');
 
 	let selected = $derived<FolderView | undefined>(folders[index]);
+	let fromFile = $derived(selected?.summary?.installs ?? null);
 
 	onMount(async () => {
 		folders = await invoke<FolderView[]>('list_folders');
@@ -111,11 +112,12 @@
 				<span>Firmware version</span>
 				<input
 					value={selected.firmware_version ?? ''}
-					placeholder="blank = always install"
+					placeholder={fromFile ? `${fromFile}, from the file name` : 'blank = the file name'}
 					onchange={(e) => change({ firmware_version: e.currentTarget.value.trim() || null })}
 				/>
 				<small class="muted"
-					>The appl.name its firmware installs. Printers already on it skip the firmware.</small
+					>The appl.name its firmware installs. Printers already on it skip the firmware. Blank
+					goes by the firmware file's name, as a printer reading a USB mirror does.</small
 				>
 			</label>
 

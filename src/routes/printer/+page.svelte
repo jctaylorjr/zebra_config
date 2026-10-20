@@ -8,7 +8,7 @@
 	import { onMount, untrack } from 'svelte';
 	import RecentPrinters from '$lib/RecentPrinters.svelte';
 	import { copy } from '$lib/clipboard';
-	import { picks } from '$lib/configure.svelte';
+	import { follow, picks } from '$lib/configure.svelte';
 	import { focus } from '$lib/focus.svelte';
 	import { printerPage, viewFor } from '$lib/printer.svelte';
 	import { onShortcut } from '$lib/shortcuts';
@@ -22,6 +22,7 @@
 		statusText,
 		type Details,
 		type FolderView,
+		type Moved,
 		type Printer,
 		type PrinterSetting,
 		type Profile
@@ -188,12 +189,19 @@
 				x.ip === e.payload.ip ? e.payload : x
 			);
 		});
+		const unMoved = listen<Moved>('printer-moved', (e) => {
+			const { from, printer } = e.payload;
+			printerPage.printers = printerPage.printers.map((x) => (x.ip === from ? printer : x));
+			follow(from, printer.ip);
+			if (ip === from) goto(printerHref(printer.ip), { replaceState: true });
+		});
 		const offs = [
 			onShortcut('refresh', () => ip && refresh(ip)),
 			onShortcut('find', () => filterBox?.focus())
 		];
 		return () => {
 			un.then((f) => f());
+			unMoved.then((f) => f());
 			offs.forEach((off) => off());
 		};
 	});

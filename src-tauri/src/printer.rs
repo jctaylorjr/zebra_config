@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -218,18 +221,18 @@ pub async fn health(ip: &str) -> anyhow::Result<Health> {
 }
 
 // after a feed or print starts, device.status reads "busy" until it's done. checks once a
-// second, for up to `max_secs`
+// second, for up to `max_secs`. a printer that's calibrating can be too busy to answer, so only
+// the last check counts
 pub async fn wait_idle(ip: &str, max_secs: u32) -> anyhow::Result<Health> {
-    let mut last = None;
-    for _ in 0..max_secs.max(1) {
+    let start = Instant::now();
+    loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let h = health(ip).await?;
-        if h.status != "busy" {
-            return Ok(h);
+        let h = health(ip).await;
+        let idle = matches!(&h, Ok(h) if h.status != "busy");
+        if idle || start.elapsed() >= Duration::from_secs(max_secs.max(1).into()) {
+            return h;
         }
-        last = Some(h);
     }
-    Ok(last.expect("checked at least once"))
 }
 
 // "ERRORS:   1 00000000 00010001" then "WARNINGS:   0 00000000 00000000": a set flag, then two

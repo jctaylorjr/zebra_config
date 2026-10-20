@@ -502,7 +502,7 @@ async fn connection(s: &mut Session<'_>, ctx: &Context) -> Option<Info> {
     };
     if let Some(want) = folders
         .folder_for(Some(&info.model))
-        .and_then(|f| f.firmware_version.clone())
+        .and_then(|f| f.firmware())
         && want != firmware
     {
         s.find(

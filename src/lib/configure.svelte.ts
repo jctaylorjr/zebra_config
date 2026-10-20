@@ -7,3 +7,14 @@ export const picks = $state({
 });
 
 export const selected = new SvelteSet<string>(); // printer ips
+
+// a printer that came back at another address after a restart keeps its choices
+export function follow(from: string, to: string) {
+	if (selected.delete(from)) selected.add(to);
+	for (const choices of [picks.profile, picks.useFolder] as Record<string, unknown>[]) {
+		if (from in choices) {
+			choices[to] = choices[from];
+			delete choices[from];
+		}
+	}
+}

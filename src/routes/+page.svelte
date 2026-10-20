@@ -2,7 +2,7 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen } from '@tauri-apps/api/event';
 	import { onMount } from 'svelte';
-	import { picks, selected } from '$lib/configure.svelte';
+	import { follow, picks, selected } from '$lib/configure.svelte';
 	import { onShortcut } from '$lib/shortcuts';
 	import { dragSelect } from '$lib/selection';
 	import {
@@ -11,6 +11,7 @@
 		printerHref,
 		statusText,
 		type FolderView,
+		type Moved,
 		type Printer,
 		type Profile
 	} from '$lib/types';
@@ -35,12 +36,18 @@
 		const un = listen<Printer>('printer-update', (e) => {
 			printers = printers.map((x) => (x.ip === e.payload.ip ? e.payload : x));
 		});
+		const unMoved = listen<Moved>('printer-moved', (e) => {
+			const { from, printer } = e.payload;
+			printers = printers.map((x) => (x.ip === from ? printer : x));
+			follow(from, printer.ip);
+		});
 		const offs = [
 			onShortcut('refresh', async () => (printers = await invoke<Printer[]>('list_printers'))),
 			onShortcut('find', () => addressBox?.focus())
 		];
 		return () => {
 			un.then((f) => f());
+			unMoved.then((f) => f());
 			offs.forEach((off) => off());
 		};
 	});

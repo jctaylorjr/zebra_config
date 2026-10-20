@@ -48,6 +48,7 @@ export type FolderSetting = {
 export type FolderView = FolderSetting & {
 	summary: {
 		firmware: string | null;
+		installs: string | null; // the appl.name the firmware installs, going by its file name
 		files: number;
 		commands: number;
 		checks: string[];
@@ -93,6 +94,9 @@ export type Details = {
 export type PrinterSetting = { key: string; value: string; choices: string | null };
 
 export const printerHref = (ip: string) => `/printer?ip=${encodeURIComponent(ip)}`;
+
+// a printer that came back at another address after a restart, e.g. renamed by new firmware
+export type Moved = { from: string; printer: Printer };
 
 // the diagnose page; see src-tauri/src/diagnose.rs
 export type CheckInfo = { id: string; label: string; about: string; feeds: boolean };
