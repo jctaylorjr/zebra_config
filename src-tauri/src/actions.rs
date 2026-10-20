@@ -16,6 +16,8 @@ pub enum Action {
     CancelJobs,
     ClearError,
     Restart,
+    FactoryReset, // printer settings, not network
+    NetworkReset,
 }
 
 impl Action {
@@ -30,7 +32,10 @@ impl Action {
             Action::Resume => b"! U1 do \"device.unpause\" \"\"\r\n",
             Action::CancelJobs => b"~JA",
             Action::Restart => b"! U1 do \"device.reset\" \"\"\r\n",
-            Action::TestLabel | Action::ClearError => return None,
+            Action::TestLabel
+            | Action::ClearError
+            | Action::FactoryReset
+            | Action::NetworkReset => return None,
         })
     }
 }
@@ -69,6 +74,27 @@ pub async fn run(ip: &str, action: Action) -> Result<String, String> {
                 .await
                 .map_err(failed)?;
             Ok("Sent".into())
+        }
+        // Zebra advises one ^JU per format. ^JUS saves the defaults, so a restart keeps them
+        Action::FactoryReset => {
+            printer::send(ip, b"^XA^JUF^XZ").await.map_err(failed)?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            printer::send(ip, b"^XA^JUS^XZ").await.map_err(failed)?;
+            Ok("Printer settings are back to factory defaults. Calibrate it and apply its profile before printing".into())
+        }
+        // network defaults only take effect after a restart
+        Action::NetworkReset => {
+            printer::send(ip, b"^XA^JUN^XZ").await.map_err(failed)?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            printer::send(ip, b"^XA^JUS^XZ").await.map_err(failed)?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            printer::send(ip, b"! U1 do \"device.reset\" \"\"\r\n")
+                .await
+                .map_err(failed)?;
+            Ok(
+                "Network settings are back to factory defaults, and the printer is restarting"
+                    .into(),
+            )
         }
         Action::ClearError => {
             worker::recover(ip, &|_| {})
@@ -166,7 +192,9 @@ mod tests {
         assert_eq!(parse("feed").command(), Some(&b"~PH"[..]));
         assert_eq!(parse("cancel_jobs").command(), Some(&b"~JA"[..]));
         assert!(parse("clear_error").command().is_none());
-        assert!(serde_json::from_str::<Action>("\"factory_reset\"").is_err());
+        assert!(parse("factory_reset").command().is_none());
+        assert!(parse("network_reset").command().is_none());
+        assert!(serde_json::from_str::<Action>("\"format_flash\"").is_err());
         assert!(serde_json::from_str::<Action>("\"calibrate\"").is_err());
     }
 

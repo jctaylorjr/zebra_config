@@ -3,6 +3,7 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { onMount } from 'svelte';
+	import { notify } from '$lib/toast.svelte';
 	import type { Media, Profile, Setting } from '$lib/types';
 
 	let saved = $state<Profile[]>([]); // what profiles.json holds
@@ -107,6 +108,63 @@
 		}
 	}
 
+	// exports what's on screen, unsaved edits included
+	async function exportProfiles(list: Profile[]) {
+		error = '';
+		try {
+			const path = await invoke<string | null>('export_profiles', {
+				profiles: list.map((p) => $state.snapshot(p))
+			});
+			if (path) notify(`Exported to ${path}`);
+		} catch (e) {
+			error = String(e);
+		}
+	}
+
+	// imported profiles join the list unsaved, to look over before saving
+	async function importProfiles() {
+		error = '';
+		let found: Profile[];
+		try {
+			found = await invoke<Profile[]>('import_profiles');
+		} catch (e) {
+			error = String(e);
+			return;
+		}
+		if (found.length === 0) return; // cancelled
+		let added = 0;
+		let replaced = 0;
+		let first = -1;
+		for (const p of found) {
+			const at = draft.findIndex((d) => d.id === p.id);
+			if (at >= 0 && JSON.stringify($state.snapshot(draft[at])) === JSON.stringify(p)) continue;
+			if (at >= 0) {
+				const replace = await confirm(
+					`"${draft[at].name}" is already here. Replace it with the imported one, or keep both?`,
+					{ title: 'Import profiles', okLabel: 'Replace', cancelLabel: 'Keep both' }
+				);
+				if (replace) {
+					draft[at] = p;
+					replaced++;
+					if (first < 0) first = at;
+					continue;
+				}
+				p.name = `${p.name} (imported)`;
+			}
+			draft.push(p);
+			const copy = draft[draft.length - 1];
+			if (at >= 0) copy.id = uniqueId(copy.name, copy);
+			added++;
+			if (first < 0) first = draft.length - 1;
+		}
+		if (first >= 0) index = first;
+		const parts = [added && `added ${added}`, replaced && `replaced ${replaced}`].filter(Boolean);
+		const summary = parts.length
+			? `Imported: ${parts.join(', ')}. Save changes to keep them.`
+			: 'Those profiles are already here.';
+		notify(summary);
+	}
+
 	let leaving = false;
 	beforeNavigate(({ to, cancel }) => {
 		if (!dirty || leaving || !to) return;
@@ -130,6 +188,12 @@
 <div class="bar">
 	<button class="primary" disabled={!dirty || !!loadError} onclick={save}>Save changes</button>
 	<button disabled={!dirty} onclick={discard}>Discard changes</button>
+	<span class="gap"></span>
+	<button onclick={importProfiles}>Import…</button>
+	<button disabled={!selected} onclick={() => selected && exportProfiles([selected])}
+		>Export…</button
+	>
+	<button disabled={draft.length === 0} onclick={() => exportProfiles(draft)}>Export all…</button>
 	{#if error}<span class="error">{error}</span>{:else if dirty}<span class="muted"
 			>Unsaved changes</span
 		>{:else if note}<span class="muted">{note}</span>{/if}
@@ -338,8 +402,12 @@
 	.bar {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 8px;
 		margin-bottom: 14px;
+	}
+	.gap {
+		width: 12px;
 	}
 	.columns {
 		display: flex;

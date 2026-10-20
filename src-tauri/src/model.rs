@@ -25,7 +25,7 @@ pub struct Printer {
     pub status: Status,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Profile {
     pub id: String,
     pub name: String,
@@ -43,21 +43,21 @@ pub struct Profile {
 }
 
 // an unchecked interface is left as it is, not switched off DHCP
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Network {
     pub wired_dhcp: bool,
     pub wireless_dhcp: bool,
     pub primary: Interface, // used when both are connected
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Interface {
     Wired,
     Wireless,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Media {
     #[serde(default)]
     pub width_in: Option<u32>, // label width in inches; none = the printer's full width
@@ -65,14 +65,14 @@ pub struct Media {
     pub sensor: Sensor,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaType {
     Gap,  // gap/notch, web sensing
     Mark, // black mark sensing
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Sensor {
     Transmissive,

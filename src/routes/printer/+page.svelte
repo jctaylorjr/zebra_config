@@ -102,7 +102,8 @@
 	};
 
 	// feeding commands check for media first; the rest just go
-	const actions: { id: string; label: string; feeds?: boolean; ask?: string; hint?: string }[] = [
+	type Command = { id: string; label: string; feeds?: boolean; ask?: string; hint?: string };
+	const actions: Command[] = [
 		{ id: 'feed', label: 'Feed a label', feeds: true },
 		{ id: 'test_label', label: 'Print test label', feeds: true },
 		{ id: 'config_label', label: 'Print configuration', feeds: true },
@@ -123,6 +124,34 @@
 		},
 		{ id: 'restart', label: 'Restart', ask: 'Restart the printer? It takes about a minute to come back.' }
 	];
+
+	// these can't be undone, so they get a card of their own that says exactly what they do
+	const resets: (Command & { about: string })[] = [
+		{
+			id: 'factory_reset',
+			label: 'Reset printer settings',
+			about:
+				'Darkness, media, sensor, print width and the other printer settings go back to Zebra’s defaults, and are saved. Network settings stay, so it stays connected. Calibrate it and apply its profile again afterwards.',
+			ask: 'Reset this printer’s settings to factory defaults? Its media, darkness and print settings are lost; its network settings are kept. This can’t be undone.'
+		},
+		{
+			id: 'network_reset',
+			label: 'Reset network settings',
+			about:
+				'Wired and Wi-Fi settings go back to Zebra’s defaults, and the printer restarts. On Wi-Fi it forgets the network and its password, so it won’t come back until it’s set up again over a cable or USB.'
+		}
+	];
+
+	const networkWarning = () => {
+		const onWifi = String(v?.details?.values['interface.network.active.cable_type'] ?? '')
+			.toLowerCase()
+			.includes('wireless');
+		return `Reset this printer’s network settings to factory defaults and restart it? ${
+			onWifi
+				? 'It’s on Wi-Fi right now, so it will drop off the network, and this app won’t reach it again until it’s set up over a cable or USB.'
+				: 'It may come back at a different address.'
+		} This can’t be undone.`;
+	};
 
 	onMount(() => {
 		(async () => {
@@ -268,18 +297,22 @@
 		refresh(target);
 	}
 
-	async function run(a: (typeof actions)[number]) {
+	async function run(a: Command) {
+		const reset = resets.some((r) => r.id === a.id);
+		const ask = a.id === 'network_reset' ? networkWarning() : a.ask;
 		if (a.feeds && !(await okToFeed(a.label, 'Feeding'))) return;
-		if (a.ask && !(await confirm(a.ask, { title: a.label }))) return;
+		if (ask && !(await confirm(ask, { title: a.label, okLabel: reset ? 'Reset' : 'OK' }))) return;
 		const target = ip;
 		const view = viewFor(target);
 		view.busy = a.id;
-		view.actionNote = view.actionError = '';
+		view.actionNote = view.actionError = view.resetNote = view.resetError = '';
 		try {
 			const done = await invoke<string>('printer_action', { ip: target, action: a.id });
-			view.actionNote = `${a.label}: ${done}`;
+			if (reset) view.resetNote = done;
+			else view.actionNote = `${a.label}: ${done}`;
 		} catch (e) {
-			view.actionError = `${a.label}: ${e}`;
+			if (reset) view.resetError = String(e);
+			else view.actionError = `${a.label}: ${e}`;
 		}
 		view.busy = null;
 		refresh(target);
@@ -533,6 +566,21 @@
 		{#if v.rawReply !== null}<pre>{v.rawReply}</pre>{/if}
 	</section>
 
+	<section class="card resets">
+		<h2>Factory reset</h2>
+		{#each resets as r}
+			<div class="reset">
+				<button class="danger" disabled={v.busy !== null} onclick={() => run(r)}>
+					{v.busy === r.id ? `${r.label}…` : r.label}
+				</button>
+				<small class="muted">{r.about}</small>
+			</div>
+		{/each}
+		{#if v.resetError}<p class="error">{v.resetError}</p>{:else if v.resetNote}<p class="ok">
+				{v.resetNote}
+			</p>{/if}
+	</section>
+
 	<section class="card">
 		<div class="bar">
 			<h2>All settings</h2>
@@ -594,6 +642,23 @@
 	}
 	.card-head h2 {
 		margin: 0;
+	}
+	.resets {
+		border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+	}
+	.reset {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+		margin-bottom: 10px;
+	}
+	.reset button {
+		flex: none;
+		width: 190px;
+	}
+	button.danger {
+		color: var(--danger);
+		border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
 	}
 	button.copy {
 		padding: 2px 10px;

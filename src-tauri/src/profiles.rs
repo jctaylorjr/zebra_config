@@ -81,6 +81,35 @@ pub fn validate(profiles: &[Profile]) -> Result<(), String> {
     Ok(())
 }
 
+// an exported file holds one profile, or a list of them
+pub fn parse_export(text: &str) -> Result<Vec<Profile>, String> {
+    if let Ok(list) = serde_json::from_str::<Vec<Profile>>(text) {
+        return Ok(list);
+    }
+    serde_json::from_str::<Profile>(text)
+        .map(|p| vec![p])
+        .map_err(|e| format!("not a profile file ({e})"))
+}
+
+// a file name from a profile's name, without the characters Windows doesn't allow
+pub fn file_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    // nor a name ending in a dot or a space
+    let clean = clean.trim().trim_end_matches('.').trim_end();
+    if clean.is_empty() {
+        "profile".into()
+    } else {
+        clean.to_string()
+    }
+}
+
 // what a new profile starts with, and what a section gets when it's switched back on
 pub fn template() -> Profile {
     Profile {
@@ -209,6 +238,28 @@ mod tests {
         .map(|p| p.name)
         .collect();
         assert_eq!(names, ["first b", "a"]);
+    }
+
+    #[test]
+    fn exported_files_hold_one_profile_or_a_list() {
+        let one = serde_json::to_string(&named("a", "One")).unwrap();
+        assert_eq!(parse_export(&one).unwrap()[0].name, "One");
+        let both = serde_json::to_string(&vec![named("a", "One"), named("b", "Two")]).unwrap();
+        assert_eq!(parse_export(&both).unwrap().len(), 2);
+        assert!(
+            parse_export("{\"what\": \"else\"}")
+                .unwrap_err()
+                .starts_with("not a profile file")
+        );
+        assert!(parse_export("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_names_are_safe_on_windows() {
+        assert_eq!(file_name("2x1 labels"), "2x1 labels");
+        assert_eq!(file_name("ZD/ZT: 4\"x6\"?"), "ZD-ZT- 4-x6--");
+        assert_eq!(file_name("ends with dots..."), "ends with dots");
+        assert_eq!(file_name("  "), "profile");
     }
 
     #[test]

@@ -11,8 +11,9 @@ mod worker;
 
 use model::{Printer, Profile, Status};
 use serde::Serialize;
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{collections::HashMap, fs, path::Path, sync::Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 #[derive(Default)]
 pub struct AppState {
@@ -94,6 +95,68 @@ fn save_profiles(
     profiles::save(&app, &profiles).map_err(|e| e.to_string())?;
     *state.profiles.lock().unwrap() = profiles.clone();
     Ok(profiles)
+}
+
+// saves profiles to a file the user picks, starting on the desktop: one profile, or a list
+#[tauri::command]
+async fn export_profiles(app: AppHandle, profiles: Vec<Profile>) -> Result<Option<String>, String> {
+    profiles::validate(&profiles)?;
+    let name = match profiles.as_slice() {
+        [one] => profiles::file_name(&one.name),
+        _ => "Zebra profiles".to_string(),
+    };
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Export profiles")
+        .add_filter("Zebra profiles", &["json"])
+        .set_file_name(format!("{name}.json"));
+    if let Ok(desktop) = app.path().desktop_dir() {
+        dialog = dialog.set_directory(desktop);
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(picked) = picked else {
+        return Ok(None); // cancelled
+    };
+    let path = picked.simplified().into_path().map_err(|e| e.to_string())?;
+    let json = match profiles.as_slice() {
+        [one] => serde_json::to_string_pretty(one),
+        all => serde_json::to_string_pretty(all),
+    }
+    .map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
+// reads the profiles in files the user picks; the page adds them for the user to review and save
+#[tauri::command]
+async fn import_profiles(app: AppHandle) -> Result<Vec<Profile>, String> {
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Import profiles")
+        .add_filter("Zebra profiles", &["json"]);
+    if let Ok(desktop) = app.path().desktop_dir() {
+        dialog = dialog.set_directory(desktop);
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_files())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut found = vec![];
+    for file in picked.unwrap_or_default() {
+        let path = file.simplified().into_path().map_err(|e| e.to_string())?;
+        let text =
+            fs::read_to_string(&path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        let list = profiles::parse_export(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        for p in &list {
+            profiles::validate(std::slice::from_ref(p))
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        found.extend(list);
+    }
+    Ok(found)
 }
 
 // what a profile changes, with the parts that depend on a printer described
@@ -397,6 +460,8 @@ pub fn run() {
             list_printers,
             list_profiles,
             save_profiles,
+            export_profiles,
+            import_profiles,
             preview_profile,
             profile_template,
             printer_details,

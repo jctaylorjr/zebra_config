@@ -12,6 +12,8 @@ export type PrinterView = {
 	busy: string | null; // the command running
 	actionNote: string;
 	actionError: string;
+	resetNote: string;
+	resetError: string;
 	rawCommand: string;
 	rawReply: string | null;
 	rawBusy: boolean;
@@ -48,6 +50,8 @@ export function viewFor(ip: string): PrinterView {
 		busy: null,
 		actionNote: '',
 		actionError: '',
+		resetNote: '',
+		resetError: '',
 		rawCommand: '',
 		rawReply: null,
 		rawBusy: false,

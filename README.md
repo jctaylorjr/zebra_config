@@ -12,6 +12,8 @@ The app has three pages, picked from the bar on the left:
   and commands such as calibrate (choosing gap/notch, black mark, continuous or auto-detect), feed,
   print the configuration label, pause and restart. Profiles can be applied from here too, each
   block of details copies to the clipboard, and the printer's own web page opens in the browser.
+  Factory reset puts the printer settings (`^JUF`) or the network settings (`^JUN`, then a
+  restart) back to Zebra's defaults.
 - **Diagnose** — runs chosen checks on one printer and lists what's wrong, with fixes to apply and
   links to Zebra's guides. Read-only checks cover errors and warnings, printer state, the
   printhead, media settings and sensor, profile settings, memory, network, weblink, the clock,
@@ -19,6 +21,8 @@ The app has three pages, picked from the bar on the left:
   sensor profile) are opt-in and only run when media is loaded. A log shows every command sent
   and each reply.
 - **Profiles** — add, edit and delete profiles, with a list of every setting the selected one changes.
+  Export saves one profile or all of them to a file, for sharing; Import adds profiles from such
+  files to the list, to look over before saving.
 - **Settings** — the Zebra folder for each model family, and its firmware version.
 
 ## What applying does
