@@ -24,6 +24,8 @@ pub struct Printer {
     pub profile_id: Option<String>,
     pub status: Status,
     #[serde(default)]
+    pub hostname: Option<String>, // as it last reported it
+    #[serde(default)]
     pub ip_addr: Option<String>, // the IP it last answered at, to look for it there if it moves
 }
 
@@ -63,8 +65,18 @@ pub enum Interface {
 pub struct Media {
     #[serde(default)]
     pub width_in: Option<u32>, // label width in inches; none = the printer's full width
+    // a width copied from another printer, used instead of width_in
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_width: Option<ExactWidth>,
     pub media_type: MediaType,
     pub sensor: Sensor,
+}
+
+// a print width as another printer has it, so a printer with another resolution prints the same
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct ExactWidth {
+    pub dots: u32,
+    pub dpi: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -80,6 +92,7 @@ pub enum MediaType {
 pub enum Sensor {
     Transmissive,
     Reflective,
+    Auto, // as a printer being copied from can have it
 }
 
 // models are substrings of the printer's model, e.g. "ZD6"; an empty list fits any printer

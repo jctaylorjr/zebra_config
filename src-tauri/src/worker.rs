@@ -8,6 +8,7 @@ use crate::{
 use serde::Serialize;
 use std::{
     collections::HashMap,
+    net::IpAddr,
     path::Path,
     sync::{
         Mutex,
@@ -80,7 +81,7 @@ fn moved(app: &AppHandle, from: &str, to: &str) {
 }
 
 // an IP or hostname the printer could be reached at; an interface that's down reports 0.0.0.0
-pub fn usable_address(addr: &str) -> bool {
+fn usable_address(addr: &str) -> bool {
     let addr = addr.trim();
     !addr.is_empty() && addr != "0.0.0.0"
 }
@@ -91,7 +92,8 @@ pub fn usable_address(addr: &str) -> bool {
 #[derive(Default)]
 struct Whereabouts {
     serial: String,
-    ip_addr: Option<String>, // where it last answered
+    ip_addr: Option<String>,         // where it last answered
+    hostname_before: Option<String>, // what it was called when this apply first read it
     places: Vec<String>,
 }
 
@@ -103,7 +105,7 @@ impl Whereabouts {
         let mut w = Whereabouts {
             serial: printer.and_then(|p| p.serial.clone()).unwrap_or_default(),
             ip_addr: printer.and_then(|p| p.ip_addr.clone()),
-            places: vec![],
+            ..Default::default()
         };
         if w.serial.is_empty() {
             return w; // nothing to tell it apart by
@@ -141,6 +143,9 @@ impl Whereabouts {
         }
         if plan.ip_addr.is_some() {
             self.ip_addr = plan.ip_addr.clone();
+        }
+        if self.hostname_before.is_none() {
+            self.hostname_before = plan.hostname.clone();
         }
         self.learn(plan.ip_addr.iter().chain(&plan.names).cloned());
     }
@@ -185,17 +190,73 @@ pub async fn apply_with_retry(
     let follow = |to: &str| moved(&app, &at.lock().unwrap(), to);
     let done = retry(&at, &profile, folder.as_ref(), &seen, &report, &follow).await;
     let ip = at.lock().unwrap().clone();
-    let firmware = match &done {
-        Status::Applied(_) => firmware_name(&ip).await.ok(),
-        _ => None,
+    let (serial, before, ip_addr) = {
+        let seen = seen.lock().unwrap();
+        (
+            seen.serial.clone(),
+            seen.hostname_before.clone(),
+            seen.ip_addr.clone(),
+        )
     };
-    // kept with the printer, so the next apply knows where it was if its name stops working
-    let ip_addr = seen.lock().unwrap().ip_addr.clone();
+    // what the printer goes by now, wherever the apply left it, so its row shows that
+    let now = printer::identify(&ip)
+        .await
+        .ok()
+        .filter(|id| serial.is_empty() || id.serial.as_deref() == Some(serial.as_str()));
+    let ip = match &now {
+        Some(id) => {
+            let to = relist(&ip, before.as_deref(), id).await;
+            if to != ip {
+                moved(&app, &ip, &to);
+            }
+            to
+        }
+        None => ip,
+    };
     update(&app, &ip, |p| {
-        p.firmware = firmware.or(p.firmware.take());
-        p.ip_addr = ip_addr.or(p.ip_addr.take());
+        match now {
+            Some(id) => {
+                p.hostname = id.hostname.or(p.hostname.take());
+                p.ip_addr = id.ip_addr.or(p.ip_addr.take());
+                p.firmware = id.firmware.or(p.firmware.take());
+            }
+            // it didn't answer, but where it last did is worth keeping for the next apply
+            None => p.ip_addr = ip_addr.or(p.ip_addr.take()),
+        }
         p.status = done;
     });
+}
+
+// the address to list a printer under after applying. the one it's listed under stays while it
+// still leads to the printer, unless it's the hostname the printer just gave up, which stops
+// working once DNS catches up. otherwise its new hostname, if DNS points that at it, or its IP
+async fn relist(ip: &str, before: Option<&str>, now: &printer::Identity) -> String {
+    let Some(addr) = now.ip_addr.as_deref() else {
+        return ip.to_string();
+    };
+    let renamed = before.is_some_and(|b| {
+        !now.hostname
+            .as_deref()
+            .is_some_and(|h| h.eq_ignore_ascii_case(b))
+    });
+    let gave_up = renamed && before.is_some_and(|b| b.eq_ignore_ascii_case(ip));
+    if !gave_up && leads_to(ip, addr).await {
+        return ip.to_string();
+    }
+    match &now.hostname {
+        Some(name) if leads_to(name, addr).await => name.clone(),
+        _ => addr.to_string(),
+    }
+}
+
+// whether `name` leads to `addr` as Windows looks it up: it's that IP, or DNS or WINS points it
+// there
+async fn leads_to(name: &str, addr: &str) -> bool {
+    name == addr
+        || printer::lookup(name)
+            .await
+            .iter()
+            .any(|ip| ip.to_string() == addr)
 }
 
 // applies until it works or can't, backing off while the printer can't be reached. `at` is
@@ -262,19 +323,39 @@ async fn look_elsewhere(
     // its own address first, so a printer that answers there again stays listed under it
     let addresses = std::iter::once(ip).chain(places.iter().map(String::as_str));
     let found = answers_at(addresses, &serial).await?;
-    (!found.eq_ignore_ascii_case(ip)).then(|| found.to_string())
+    (!found.eq_ignore_ascii_case(ip)).then_some(found)
 }
 
-// the first of `addresses` where the printer answers with its serial
-async fn answers_at<'a>(addresses: impl Iterator<Item = &'a str>, serial: &str) -> Option<&'a str> {
-    for addr in addresses {
-        if let Ok(got) = printer::query(addr, &["device.unique_id"]).await
-            && got["device.unique_id"].as_str().map(str::trim) == Some(serial)
-        {
-            return Some(addr);
+// the first of `addresses` where the printer answers with its serial, as what to reach it by
+async fn answers_at<'a>(addresses: impl Iterator<Item = &'a str>, serial: &str) -> Option<String> {
+    for place in addresses {
+        for target in targets(place).await {
+            if let Ok(got) = printer::query(&target, &["device.unique_id"]).await
+                && got["device.unique_id"].as_str().map(str::trim) == Some(serial)
+            {
+                return Some(reach_by(place, &target).await);
+            }
         }
     }
     None
+}
+
+// where to try a place: an IP as it is, a name at whatever IPs DNS has for it now
+async fn targets(place: &str) -> Vec<String> {
+    if place.parse::<IpAddr>().is_ok() {
+        return vec![place.to_string()];
+    }
+    let found = printer::lookup_fresh(place).await;
+    found.iter().map(IpAddr::to_string).collect()
+}
+
+// what to reach a printer by once it has answered at `ip`, found as `place`: the name while
+// Windows' own lookups lead there too, since the app connects by it from then on, else the IP
+async fn reach_by(place: &str, ip: &str) -> String {
+    match leads_to(place, ip).await {
+        true => place.to_string(),
+        false => ip.to_string(),
+    }
 }
 
 // what a profile sends to one printer, which depends on the printer and its firmware
@@ -283,9 +364,33 @@ struct Plan {
     firmware: String,             // appl.name
     skipped: Vec<setup::Setting>, // settings the printer doesn't have
     extra: Vec<String>,
-    label: Option<String>,   // the test label
-    names: Vec<String>,      // hostnames it may answer to after a restart
-    ip_addr: Option<String>, // its IP on the network it's using
+    label: Option<String>,    // the test label
+    names: Vec<String>,       // hostnames it may answer to after a restart
+    ip_addr: Option<String>,  // its IP on the network it's using
+    hostname: Option<String>, // ip.hostname on Link-OS 7.6 and later, else the friendly name
+    needs_restart: bool,      // it changes settings that only take effect at a restart
+}
+
+// settings that only take effect once the printer restarts
+const ON_RESTART: [&str; 7] = [
+    "ip.hostname",
+    "device.friendly_name", // the hostname before Link-OS 7.6
+    "internal_wired.ip.dhcp.option12",
+    "wlan.ip.dhcp.option12",
+    "internal_wired.ip.protocol",
+    "wlan.ip.protocol",
+    "ip.primary_network",
+];
+
+// whether the profile changes a setting that only takes effect at a restart, going by what the
+// printer has now, so applying it again doesn't restart a printer for nothing
+fn needs_restart(kept: &[setup::Setting], has: &serde_json::Value) -> bool {
+    kept.iter().any(|s| {
+        ON_RESTART.contains(&s.key.as_str())
+            && !has[s.key.as_str()]
+                .as_str()
+                .is_some_and(|v| same_value(v, &s.value))
+    })
 }
 
 async fn read_plan(ip: &str, p: &Profile) -> Result<Plan, ApplyError> {
@@ -357,14 +462,19 @@ async fn read_plan(ip: &str, p: &Profile) -> Result<Plan, ApplyError> {
         &target.serial,
         &kept,
     );
+    let hostname = [get("ip.hostname"), get("device.friendly_name")]
+        .into_iter()
+        .find(|h| !h.is_empty());
     Ok(Plan {
         firmware: got["appl.name"].as_str().unwrap_or("").to_string(),
         serial: target.serial,
+        needs_restart: needs_restart(&kept, &has),
         skipped,
         extra,
         label,
         names,
         ip_addr: Some(get("interface.network.active.ip_addr")).filter(|a| usable_address(a)),
+        hostname,
     })
 }
 
@@ -438,23 +548,19 @@ async fn apply_once(
             printer::send(&ip, firmware).await.map_err(unreachable)?;
             flashed.store(true, Ordering::Relaxed);
             step("Waiting for restart");
-            let places = seen.lock().unwrap().besides(&ip);
             // only a version that's set has to be reported, since a file can be named anything
-            let Some(at) = wait_for_restart(&ip, &plan.serial, &places, set).await else {
-                let looked = looked_at(&ip, &places);
-                return Err(ApplyError::Mismatch(match set {
-                    Some(v) => {
-                        format!("printer did not report firmware {v} within 20 min; {looked}")
-                    }
-                    None => format!(
-                        "printer did not restart within 20 min of the firmware download; {looked}"
-                    ),
-                }));
-            };
-            if at != ip {
-                follow(&at);
-                ip = at;
-            }
+            follow_restart(&mut ip, &plan.serial, seen, set, follow)
+                .await
+                .map_err(|looked| {
+                    ApplyError::Mismatch(match set {
+                        Some(v) => {
+                            format!("printer did not report firmware {v} within 20 min; {looked}")
+                        }
+                        None => format!(
+                            "printer did not restart within 20 min of the firmware download; {looked}"
+                        ),
+                    })
+                })?;
             // new firmware can have settings the old one didn't, e.g. ip.hostname from 7.6
             plan = read_plan(&ip, p).await?;
             seen.lock().unwrap().read(&plan);
@@ -499,18 +605,38 @@ async fn apply_once(
         }
         if resets_printer(data) {
             step("Waiting for restart");
-            let places = seen.lock().unwrap().besides(&ip);
-            let Some(at) = wait_for_restart(&ip, &plan.serial, &places, None).await else {
-                return Err(ApplyError::Unverified(format!(
-                    "printer did not come back after a command file reset it; {}",
-                    looked_at(&ip, &places)
-                )));
-            };
-            if at != ip {
-                follow(&at);
-                ip = at;
-            }
+            follow_restart(&mut ip, &plan.serial, seen, None, follow)
+                .await
+                .map_err(|looked| {
+                    ApplyError::Unverified(format!(
+                        "printer did not come back after a command file reset it; {looked}"
+                    ))
+                })?;
         }
+    }
+
+    // hostname and network settings only take effect at a restart. when nothing restarted the
+    // printer after the profile's, it's restarted and followed now, rather than moving later
+    let restarted =
+        resets_printer(extra.as_bytes()) || usb.commands.iter().any(|(_, d)| resets_printer(d));
+    if plan.needs_restart && !restarted {
+        step("Restarting for the network settings");
+        printer::send(&ip, b"! U1 do \"device.reset\" \"\"\r\n")
+            .await
+            .map_err(|e| {
+                ApplyError::Unverified(format!(
+                    "sent everything, but couldn't restart the printer: {e}"
+                ))
+            })?;
+        step("Waiting for restart");
+        follow_restart(&mut ip, &plan.serial, seen, None, follow)
+            .await
+            .map_err(|looked| {
+                ApplyError::Unverified(format!(
+                    "restarted the printer for its network settings, and it didn't come back; {looked}"
+                ))
+            })?;
+        checked.push("restarted for the network settings".to_string());
     }
 
     step("Verifying");
@@ -663,11 +789,6 @@ pub async fn recover(ip: &str, step: &(dyn Fn(&str) + Sync)) -> Result<(), Apply
         .map_err(stopped)
 }
 
-async fn firmware_name(ip: &str) -> anyhow::Result<String> {
-    let got = printer::query(ip, &["appl.name"]).await?;
-    Ok(got["appl.name"].as_str().unwrap_or("").to_string())
-}
-
 // with a known firmware version, wait until the printer reports it; otherwise wait for it
 // to drop off the network and come back. a restart can give it a new address, e.g. Link-OS 7.6
 // renames it and can switch it to wireless, so with its serial known it's also looked for at
@@ -690,41 +811,66 @@ async fn wait_for_restart(
         tokio::time::sleep(Duration::from_secs(10)).await;
         let mut answered = None;
         let addresses = std::iter::once(ip).chain(places.iter().map(String::as_str));
-        for (i, addr) in addresses.enumerate() {
-            // DHCP can hand the old address to another printer
-            let got = printer::query(addr, &["device.unique_id", "appl.name", "device.uptime"])
-                .await
-                .ok()
-                .filter(|got| {
-                    serial.is_empty()
-                        || got["device.unique_id"].as_str().map(str::trim) == Some(serial)
-                });
-            let Some(got) = got else {
-                went_down |= i == 0;
-                continue;
-            };
-            // a printer busy writing firmware can stop answering for a while without restarting,
-            // so it has restarted once it's been on for less time than this wait. one without
-            // device.uptime has to be seen going down instead
-            let restarted = match got["device.uptime"].as_str().and_then(parse_uptime) {
-                Some(up) => up < start.elapsed(),
-                None => went_down,
-            };
-            let back = match want {
-                Some(v) => got["appl.name"].as_str() == Some(v),
-                None => restarted,
-            };
-            if back {
-                answered = Some(addr);
-                break;
+        'places: for (i, place) in addresses.enumerate() {
+            let mut heard = false;
+            for target in targets(place).await {
+                // DHCP can hand the old address to another printer
+                let got =
+                    printer::query(&target, &["device.unique_id", "appl.name", "device.uptime"])
+                        .await
+                        .ok()
+                        .filter(|got| {
+                            serial.is_empty()
+                                || got["device.unique_id"].as_str().map(str::trim) == Some(serial)
+                        });
+                let Some(got) = got else {
+                    continue;
+                };
+                heard = true;
+                // a printer busy writing firmware can stop answering for a while without
+                // restarting, so it has restarted once it's been on for less time than this
+                // wait. one without device.uptime has to be seen going down instead
+                let restarted = match got["device.uptime"].as_str().and_then(parse_uptime) {
+                    Some(up) => up < start.elapsed(),
+                    None => went_down,
+                };
+                let back = match want {
+                    Some(v) => got["appl.name"].as_str() == Some(v),
+                    None => restarted,
+                };
+                if back {
+                    answered = Some(reach_by(place, &target).await);
+                    break 'places;
+                }
             }
+            went_down |= i == 0 && !heard;
         }
         match answered {
-            Some(addr) if last_back.as_deref() == Some(addr) => return Some(addr.to_string()),
-            other => last_back = other.map(String::from),
+            Some(addr) if last_back.as_deref() == Some(addr.as_str()) => return Some(addr),
+            other => last_back = other,
         }
     }
     None
+}
+
+// waits for the printer to restart, and follows it to wherever it answers. if it doesn't come
+// back, says where it was looked for
+async fn follow_restart(
+    ip: &mut String,
+    serial: &str,
+    seen: &Mutex<Whereabouts>,
+    want: Option<&str>,
+    follow: &(dyn Fn(&str) + Sync),
+) -> Result<(), String> {
+    let places = seen.lock().unwrap().besides(ip);
+    let Some(at) = wait_for_restart(ip, serial, &places, want).await else {
+        return Err(looked_at(ip, &places));
+    };
+    if at != *ip {
+        follow(&at);
+        *ip = at;
+    }
+    Ok(())
 }
 
 // how long the printer has been on, from device.uptime, e.g. "00 days 00 hours 09 mins 34 secs"
@@ -898,6 +1044,7 @@ mod tests {
             firmware: None,
             profile_id: None,
             status: Status::Pending,
+            hostname: Some("ZD611-DGN260506510".into()),
             ip_addr: Some("10.15.18.21".into()),
         }
     }
@@ -950,6 +1097,8 @@ mod tests {
             label: None,
             names: vec!["ZD611-DGN260506510".into()],
             ip_addr: Some("10.15.18.30".into()),
+            hostname: Some("ZD611-DGN260506510".into()),
+            needs_restart: false,
         });
         w.learn(["0.0.0.0".to_string()]);
         assert_eq!(w.ip_addr.as_deref(), Some("10.15.18.30"));
@@ -966,6 +1115,62 @@ mod tests {
                 .besides("x")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn restarts_only_for_network_settings_the_printer_doesnt_have() {
+        let set = |key: &str, value: &str| setup::Setting {
+            label: "",
+            key: key.into(),
+            value: value.into(),
+        };
+        let has = serde_json::json!({
+            "print.tone_zpl": "20.0",
+            "device.friendly_name": "CSCDGN260506510",
+            "ip.primary_network": "2",
+        });
+        // darkness takes effect straight away, and the printer already has the name
+        assert!(!needs_restart(
+            &[
+                set("print.tone_zpl", "25.0"),
+                set("device.friendly_name", "CSCDGN260506510")
+            ],
+            &has
+        ));
+        // the preferred network only changes at a restart
+        assert!(needs_restart(&[set("ip.primary_network", "1")], &has));
+    }
+
+    #[tokio::test]
+    async fn tries_an_ip_as_it_is_and_a_name_at_what_dns_has() {
+        assert_eq!(targets("192.0.2.10").await, ["192.0.2.10"]);
+        assert!(targets("nothing.invalid").await.is_empty());
+        assert!(
+            targets("localhost")
+                .await
+                .iter()
+                .any(|ip| ip.starts_with("127."))
+        );
+    }
+
+    // .invalid names never resolve
+    #[tokio::test]
+    async fn relists_a_printer_that_gave_up_its_name() {
+        let now = printer::Identity {
+            hostname: Some("cscdgn260506510.invalid".into()),
+            ip_addr: Some("192.0.2.10".into()),
+            ..Default::default()
+        };
+        let old = "zd611-dgn260506510.invalid";
+        // listed under the name the profile replaced, and DNS doesn't have the new one: its IP
+        assert_eq!(relist(old, Some(old), &now).await, "192.0.2.10");
+        // listed under its IP, it stays
+        assert_eq!(relist("192.0.2.10", Some(old), &now).await, "192.0.2.10");
+        // an IP it doesn't have any more is replaced by the one it has
+        assert_eq!(relist("192.0.2.99", None, &now).await, "192.0.2.10");
+        // without an IP to go by, nothing moves
+        let unknown = printer::Identity::default();
+        assert_eq!(relist("192.0.2.99", None, &unknown).await, "192.0.2.99");
     }
 
     #[test]
@@ -1027,10 +1232,7 @@ mod tests {
             });
         let start = Instant::now();
         let log = |s: &str| println!("{:>5}s {s}", start.elapsed().as_secs());
-        log(&format!(
-            "firmware before: {:?}",
-            firmware_name(&ip).await.ok()
-        ));
+        log(&format!("before: {:?}", printer::identify(&ip).await.ok()));
         let at = Mutex::new(ip);
         let report = |s: Status| log(&serde_json::to_string(&s).unwrap());
         let follow = |to: &str| log(&format!("moved to {to}"));
@@ -1038,10 +1240,15 @@ mod tests {
         let done = retry(&at, &p, folder.as_ref(), &seen, &report, &follow).await;
         report(done.clone());
         let ip = at.lock().unwrap().clone();
-        log(&format!(
-            "firmware after: {:?} at {ip}",
-            firmware_name(&ip).await.ok()
-        ));
+        let now = printer::identify(&ip).await.ok();
+        log(&format!("after, at {ip}: {now:?}"));
+        if let Some(now) = &now {
+            let before = seen.lock().unwrap().hostname_before.clone();
+            log(&format!(
+                "the app would list it as {}",
+                relist(&ip, before.as_deref(), now).await
+            ));
+        }
         assert!(matches!(done, Status::Applied(_)));
     }
 }

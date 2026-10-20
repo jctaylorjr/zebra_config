@@ -52,6 +52,12 @@
 		};
 	});
 
+	// what a printer also goes by, besides the address it's listed under
+	const alsoKnownAs = (p: Printer) =>
+		[p.hostname, p.ip_addr].filter(
+			(a): a is string => !!a && a.toLowerCase() !== p.ip.toLowerCase()
+		);
+
 	// every folder is called Zebra, so name it by what it's in, e.g. ZEBRA_USB
 	const folderName = (p: Printer) =>
 		folderFor(folders, p.model)
@@ -218,6 +224,7 @@
 		<tbody>
 			{#each printers as p, i (p.ip)}
 				{@const folder = folderName(p)}
+				{@const aka = alsoKnownAs(p)}
 				<tr
 					class:selected={selected.has(p.ip)}
 					onpointerdown={(e) => rowDown(e, i)}
@@ -231,7 +238,12 @@
 							onchange={(e) => toggle(p.ip, e.currentTarget.checked)}
 						/>
 					</td>
-					<td><a href={printerHref(p.ip)} title="Open this printer's page">{p.ip}</a></td>
+					<td>
+						<a href={printerHref(p.ip)} title="Open this printer's page">{p.ip}</a>
+						{#if aka.length}<br /><small class="muted" title="Its hostname and IP"
+								>{aka.join(' · ')}</small
+							>{/if}
+					</td>
 					<td>{p.model ?? '?'}</td>
 					<td>{p.serial ?? '?'}</td>
 					<td>{p.firmware ?? '?'}</td>

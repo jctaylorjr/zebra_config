@@ -27,7 +27,7 @@
 	];
 
 	const shortcuts = [
-		['Ctrl+1 to Ctrl+5', 'Go to Configure, Printer, Diagnose, Profiles or Settings'],
+		['Ctrl+1 to Ctrl+6', 'Go to Configure, Printer, Diagnose, Profiles, Clone or Settings'],
 		['Alt+← and Alt+→', 'Back and forward; the mouse’s back and forward buttons too'],
 		['F5 or Ctrl+R', 'Refresh: re-reads the printer on the Printer page, the list on Configure'],
 		['Ctrl+F', 'Jump to the filter on the Printer page, or the address box on Configure'],

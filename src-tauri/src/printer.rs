@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    net::IpAddr,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -36,6 +37,162 @@ pub async fn query(ip: &str, keys: &[&str]) -> anyhow::Result<serde_json::Value>
         }
     }
     anyhow::bail!("no valid response from {ip}")
+}
+
+// which printer it is, and what it goes by now
+#[derive(serde::Serialize, Debug, Default, Clone, PartialEq)]
+pub struct Identity {
+    pub model: Option<String>,
+    pub serial: Option<String>,
+    pub hostname: Option<String>, // ip.hostname on Link-OS 7.6 and later, else the friendly name
+    pub ip_addr: Option<String>,  // its IP on the network it's using
+    pub firmware: Option<String>,
+}
+
+pub async fn identify(ip: &str) -> anyhow::Result<Identity> {
+    let v = query(
+        ip,
+        &[
+            "device.product_name",
+            "device.unique_id",
+            "ip.hostname",
+            "device.friendly_name",
+            "interface.network.active.ip_addr",
+            "appl.name",
+        ],
+    )
+    .await?;
+    let get = |k: &str| {
+        v[k].as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    Ok(Identity {
+        model: get("device.product_name"),
+        serial: get("device.unique_id"),
+        hostname: get("ip.hostname").or_else(|| get("device.friendly_name")),
+        // an interface that's down reports 0.0.0.0
+        ip_addr: get("interface.network.active.ip_addr").filter(|a| a != "0.0.0.0"),
+        firmware: get("appl.name"),
+    })
+}
+
+// the IPs `name` leads to as Windows looks it up, which also asks WINS, where printers' short
+// names often are. Windows remembers answers for minutes, a name that didn't exist included,
+// which would hide a printer's new hostname while the app waits for the printer to take it, so
+// it's made to forget the name first
+pub async fn lookup(name: &str) -> Vec<IpAddr> {
+    #[cfg(windows)]
+    {
+        let name = name.to_string();
+        let _ = tokio::task::spawn_blocking(move || windows_dns::forget(&name)).await;
+    }
+    tokio::net::lookup_host((name, 0))
+        .await
+        .map(|found| found.map(|a| a.ip()).collect())
+        .unwrap_or_default()
+}
+
+// the same, and DNS's own answer, asked past the cache
+pub async fn lookup_fresh(name: &str) -> Vec<IpAddr> {
+    #[cfg(windows)]
+    let mut found = {
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || windows_dns::ask_dns(&name))
+            .await
+            .unwrap_or_default()
+    };
+    #[cfg(not(windows))]
+    let mut found = vec![];
+    for ip in lookup(name).await {
+        if !found.contains(&ip) {
+            found.push(ip);
+        }
+    }
+    found
+}
+
+#[cfg(windows)]
+mod windows_dns {
+    use std::{
+        net::{IpAddr, Ipv4Addr},
+        sync::OnceLock,
+    };
+    use windows_sys::Win32::{
+        NetworkManagement::Dns::{
+            DNS_QUERY_BYPASS_CACHE, DNS_QUERY_NO_MULTICAST, DNS_QUERY_NO_NETBT, DNS_RECORDA,
+            DNS_TYPE_A, DnsFree, DnsFreeRecordList, DnsQuery_W,
+        },
+        System::LibraryLoader::{GetProcAddress, LoadLibraryW},
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+
+    // makes Windows forget what it remembers about `name`, a name that didn't exist included, so
+    // the next lookup asks again. the call that does it isn't documented, though ipconfig's
+    // /flushdns relies on the same family, so it's found when first needed and skipped if Windows
+    // lacks it, rather than linked, which would stop the app starting at all
+    pub fn forget(name: &str) {
+        type Flush = unsafe extern "system" fn(*const u16) -> i32;
+        static FLUSH: OnceLock<Option<Flush>> = OnceLock::new();
+        let flush = FLUSH.get_or_init(|| {
+            // SAFETY: dnsapi.dll stays loaded once loaded, and the function takes a
+            // NUL-terminated name and returns a BOOL
+            unsafe {
+                let dll = LoadLibraryW(wide("dnsapi.dll").as_ptr());
+                if dll.is_null() {
+                    return None;
+                }
+                let f = GetProcAddress(dll, c"DnsFlushResolverCacheEntry_W".as_ptr().cast())?;
+                Some(std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    Flush,
+                >(f))
+            }
+        });
+        if let Some(flush) = flush {
+            // SAFETY: the name is NUL-terminated and outlives the call
+            unsafe {
+                flush(wide(name).as_ptr());
+            }
+        }
+    }
+
+    // DNS's own answer, past the cache, in IPv4 as printers are reached. NetBIOS and multicast
+    // are left to the usual lookup, since this call only waits on them and then gives up
+    pub fn ask_dns(name: &str) -> Vec<IpAddr> {
+        let wide = wide(name);
+        let options = DNS_QUERY_BYPASS_CACHE | DNS_QUERY_NO_NETBT | DNS_QUERY_NO_MULTICAST;
+        let mut records: *mut DNS_RECORDA = std::ptr::null_mut();
+        let mut found = vec![];
+        // SAFETY: the name is NUL-terminated, and the list DnsQuery_W returns is only read
+        // while it's alive, then freed once
+        unsafe {
+            let status = DnsQuery_W(
+                wide.as_ptr(),
+                DNS_TYPE_A,
+                options,
+                std::ptr::null_mut(),
+                &mut records,
+                std::ptr::null_mut(),
+            );
+            let mut r = records;
+            while status == 0 && !r.is_null() {
+                if (*r).wType == DNS_TYPE_A {
+                    let ip = (*r).Data.A.IpAddress.to_ne_bytes();
+                    found.push(IpAddr::V4(Ipv4Addr::from(ip)));
+                }
+                r = (*r).pNext;
+            }
+            if !records.is_null() {
+                DnsFree(records as *const _, DnsFreeRecordList);
+            }
+        }
+        found
+    }
 }
 
 pub async fn send(ip: &str, data: &[u8]) -> anyhow::Result<()> {

@@ -12,6 +12,7 @@ export type Printer = {
 	firmware: string | null;
 	profile_id: string | null;
 	status: Status;
+	hostname: string | null; // as it last reported it
 	ip_addr: string | null; // the IP it last answered at
 };
 
@@ -23,8 +24,9 @@ export type Network = {
 
 export type Media = {
 	width_in: number | null;
+	exact_width?: { dots: number; dpi: number } | null; // copied from another printer
 	media_type: 'gap' | 'mark' | 'continuous';
-	sensor: 'transmissive' | 'reflective';
+	sensor: 'transmissive' | 'reflective' | 'auto';
 };
 
 export type Profile = {
@@ -98,6 +100,15 @@ export const printerHref = (ip: string) => `/printer?ip=${encodeURIComponent(ip)
 
 // a printer that came back at another address after a restart, e.g. renamed by new firmware
 export type Moved = { from: string; printer: Printer };
+
+// the printer the Clone page copies from; see src-tauri/src/clone.rs
+export type CloneSource = {
+	model: string | null;
+	serial: string | null;
+	hostname: string | null;
+	ip_addr: string | null;
+	settings: { id: string; label: string; value: string }[]; // only what it has
+};
 
 // the diagnose page; see src-tauri/src/diagnose.rs
 export type CheckInfo = { id: string; label: string; about: string; feeds: boolean };

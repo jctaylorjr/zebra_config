@@ -125,6 +125,7 @@ pub fn template() -> Profile {
         }),
         media: Some(Media {
             width_in: Some(2),
+            exact_width: None,
             media_type: MediaType::Gap,
             sensor: Sensor::Transmissive,
         }),
@@ -144,6 +145,7 @@ fn media_defaults() -> Vec<Profile> {
         models: vec!["ZD".into()],
         media: Some(Media {
             width_in,
+            exact_width: None,
             media_type,
             sensor,
         }),
@@ -291,6 +293,7 @@ mod tests {
         );
         let zero = Media {
             width_in: Some(0),
+            exact_width: None,
             media_type: MediaType::Gap,
             sensor: Sensor::Transmissive,
         };

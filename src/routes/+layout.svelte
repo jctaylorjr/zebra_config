@@ -46,6 +46,12 @@
 			icon: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'
 		},
 		{
+			href: '/clone',
+			label: 'Clone',
+			// two overlapping sheets: one printer's settings copied onto another
+			icon: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>'
+		},
+		{
 			href: '/settings',
 			label: 'Settings',
 			// gear
@@ -77,7 +83,7 @@
 			e.preventDefault();
 			if (e.key === 'ArrowLeft') history.back();
 			else history.forward();
-		} else if (mod && /^[1-5]$/.test(e.key)) {
+		} else if (mod && /^[1-6]$/.test(e.key)) {
 			e.preventDefault();
 			goto(linkFor(sections[Number(e.key) - 1].href));
 		} else if (e.key === 'F5' || (mod && key === 'r')) {

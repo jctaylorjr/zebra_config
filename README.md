@@ -3,11 +3,12 @@
 A desktop app (Tauri + SvelteKit) that sets up Zebra printers over the network, as if a
 USB mirror stick had been plugged into each one.
 
-The app has three pages, picked from the bar on the left:
+The app has six pages, picked from the bar on the left:
 
 - **Configure** — add printers by IP address or hostname, pick a profile for each, choose whether
-  to send the Zebra folder too, and apply. The app only ever talks to printers you enter; it
-  never scans the network.
+  to send the Zebra folder too, and apply. Each row shows the printer's hostname and IP under the
+  address it's listed by. The app never scans the network: it only talks to the printers you
+  enter, at the addresses they've had and under the names they may have.
 - **Printer** — one printer's alerts, status, network, media and counters, every setting it reports,
   and commands such as calibrate (choosing gap/notch, black mark, continuous or auto-detect), feed,
   print the configuration label, pause and restart. Profiles can be applied from here too, each
@@ -24,8 +25,16 @@ The app has three pages, picked from the bar on the left:
   Export saves one profile or all of them to a file, for sharing; Import adds profiles from such
   files to the list, to look over before saving. The Zebra folders tab sets the folder for each
   model family, and its firmware version.
+- **Clone** — copies one printer's hostname and print settings to another, such as a loaner standing
+  in for a printer that's away: darkness, print speed, print method and mode, media type, sensor and
+  print width (the same size at another resolution), tear-off, label top, left position,
+  orientation, what it does when turned on or the head is closed, and the longest label. The hostname
+  is copied as it is, even though it holds the other printer's serial. Read the printer to copy
+  from, untick anything to leave alone, and clone; the printer copied to joins the Configure list,
+  and the settings are applied as a profile would be, with a restart so the name takes effect.
+  Two printers can't share a name, so take the old one off the network once the loaner is set up.
 - **Settings** — light, dark or system theme, where the data is saved, and the keyboard shortcuts
-  (Ctrl+1–5 for the pages, F5 to refresh, Ctrl+F to filter, Ctrl+S to save, Ctrl+Enter to diagnose).
+  (Ctrl+1–6 for the pages, F5 to refresh, Ctrl+F to filter, Ctrl+S to save, Ctrl+Enter to diagnose).
 
 The Printer page only polls its printer while the window is focused. Applying profiles and running
 diagnoses happen in the backend, so they carry on whichever page is open and whether or not the
@@ -92,8 +101,9 @@ the branch.
    commands. The hostname goes to `ip.hostname` on Link-OS 7.6 and later, and to
    `device.friendly_name` on every printer, since that is the hostname on older firmware. These
    are sent just before the first command file that resets the printer, so that restart puts the
-   hostname and network settings into effect while the app is watching; with no such file they
-   go last, and take effect at the printer's next restart.
+   hostname and network settings into effect while the app is watching. When nothing restarts
+   the printer after them and the profile changes a hostname or network setting the printer
+   doesn't have yet, the app restarts it.
 3. **Checks** — every `setvar` is read back, and every file the folder puts on `E:` (including
    uploads inside command files, such as `WEBLINK1_CA.NRD`) must be there.
 4. **Calibrate and test print** — for media profiles, only if there is media and the head is
@@ -104,6 +114,16 @@ a switch between wired and wireless can move a printer, so while it isn't answer
 looks for it, by its serial, at the IPs it has answered at (including on the Printer and Diagnose
 pages) and under the names it may have now: the profile's hostname, `{model}-{serial}`, and its
 serial. When it answers somewhere else, its row moves there. The app still never scans the network.
+
+Names are looked up the way `ping` looks them up, WINS included, where printers' short names
+often are, except that Windows is first made to forget what it remembered about the name, and DNS
+is asked directly too. Windows remembers a name that didn't exist for minutes, so without this a
+new hostname the app checked a moment too early would stay hidden; a printer registers its new
+name in WINS within seconds of restarting.
+
+After applying, each printer's row shows the hostname, IP and firmware the printer reports. A row
+listed under the hostname the profile just replaced moves to the new hostname, if DNS has it, or
+else to the printer's IP, since the old name stops working once DNS catches up.
 
 ## Settings
 
@@ -147,4 +167,9 @@ cargo test -- --ignored --nocapture
 ```
 
 Both `ZEBRA_TEST_FOLDER` and `ZEBRA_TEST_PROFILE` are optional. A media profile calibrates and
-prints a test label when media is loaded.
+prints a test label when media is loaded. To try a clone, print the profile a printer's settings
+make, optionally under another name, and apply it with the test above:
+
+```sh
+ZEBRA_CLONE_FROM=192.168.1.50 ZEBRA_CLONE_NAME=TEST1 cargo test clone_profile -- --ignored --nocapture
+```

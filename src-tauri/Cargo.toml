@@ -1,6 +1,6 @@
 [package]
 name = "zebra_configure"
-version = "0.2.0"
+version = "0.3.0"
 description = "Configures Zebra printers over the network"
 authors = ["jctaylorjr"]
 edition = "2024"
@@ -26,6 +26,13 @@ anyhow = "1.0.104"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+
+# looks past Windows' name cache when looking for a printer by a name it has just taken
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_NetworkManagement_Dns",
+    "Win32_System_LibraryLoader",
+] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

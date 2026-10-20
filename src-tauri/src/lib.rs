@@ -1,4 +1,5 @@
 mod actions;
+mod clone;
 mod diagnose;
 mod model;
 mod printer;
@@ -40,26 +41,16 @@ async fn add_printer(state: State<'_, AppState>, ip: String) -> Result<Printer, 
     if ip.is_empty() {
         return Err("enter an IP address or hostname".into());
     }
-    let info = printer::query(
-        &ip,
-        &[
-            "device.product_name",
-            "device.unique_id",
-            "appl.name",
-            "interface.network.active.ip_addr",
-        ],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let get = |k: &str| info.get(k).and_then(|v| v.as_str()).map(String::from);
+    let id = printer::identify(&ip).await.map_err(|e| e.to_string())?;
     let p = Printer {
         ip: ip.clone(),
-        model: get("device.product_name"),
-        serial: get("device.unique_id"),
-        firmware: get("appl.name"),
+        model: id.model,
+        serial: id.serial,
+        firmware: id.firmware,
         profile_id: None,
         status: Status::Pending,
-        ip_addr: get("interface.network.active.ip_addr").filter(|a| worker::usable_address(a)),
+        hostname: id.hostname,
+        ip_addr: id.ip_addr,
     };
     let mut printers = state.printers.lock().unwrap();
     // the same printer can be entered by hostname or by IP, so compare serials too
@@ -252,9 +243,21 @@ fn apply_profile(
         .find(|p| p.id == profile_id)
         .cloned()
         .ok_or("no such profile")?;
+    start(&app, &state, &ip, profile, Some(profile_id), use_folder)
+}
+
+// applies `profile` to the listed printer `ip`, with its model's Zebra folder if asked
+fn start(
+    app: &AppHandle,
+    state: &AppState,
+    ip: &str,
+    profile: Profile,
+    profile_id: Option<String>,
+    use_folder: bool,
+) -> Result<(), String> {
     let folder = {
         let mut printers = state.printers.lock().unwrap();
-        let p = printers.get_mut(&ip).ok_or("unknown printer")?;
+        let p = printers.get_mut(ip).ok_or("unknown printer")?;
         if !model::fits(&profile.models, p.model.as_deref()) {
             return Err(format!(
                 "{} is not for a {}",
@@ -262,7 +265,9 @@ fn apply_profile(
                 p.model.as_deref().unwrap_or("printer of unknown model")
             ));
         }
-        p.profile_id = Some(profile_id);
+        if profile_id.is_some() {
+            p.profile_id = profile_id;
+        }
         // folders hold firmware, so each model family only ever gets its own
         let settings = state.settings.lock().unwrap();
         use_folder
@@ -271,13 +276,89 @@ fn apply_profile(
     };
     // re-applying cancels whatever is already running for this printer, before starting over
     let mut tasks = state.tasks.lock().unwrap();
-    if let Some(old) = tasks.remove(&ip) {
+    if let Some(old) = tasks.remove(ip) {
         old.abort();
     }
-    let handle =
-        tauri::async_runtime::spawn(worker::apply_with_retry(app, ip.clone(), profile, folder));
-    tasks.insert(ip, handle);
+    let handle = tauri::async_runtime::spawn(worker::apply_with_retry(
+        app.clone(),
+        ip.to_string(),
+        profile,
+        folder,
+    ));
+    tasks.insert(ip.to_string(), handle);
     Ok(())
+}
+
+// what the Clone page shows about the printer to copy from
+#[tauri::command]
+async fn clone_source(ip: String) -> Result<clone::Source, String> {
+    clone::read(ip.trim()).await.map_err(|e| e.to_string())
+}
+
+// makes the printer at `to` like the one at `from`, e.g. a loaner standing in for it: lists it
+// on Configure if it isn't there yet, and applies the settings picked, read from `from` now, as
+// Configure applies a profile. returns where Configure lists it
+#[tauri::command]
+async fn clone_printer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    pick: Vec<String>,
+    use_folder: bool,
+) -> Result<String, String> {
+    let source = clone::read(from.trim())
+        .await
+        .map_err(|e| format!("can't read {}: {e}", from.trim()))?;
+    let profile = clone::profile(&source, &pick)?;
+    let to = listed(&state, to.trim()).await?;
+    let serial = state
+        .printers
+        .lock()
+        .unwrap()
+        .get(&to)
+        .and_then(|p| p.serial.clone());
+    if serial.is_some() && serial == source.serial {
+        return Err("that's the printer being copied from".into());
+    }
+    start(&app, &state, &to, profile, None, use_folder)?;
+    Ok(to)
+}
+
+// where Configure lists the printer at `address`, adding it if it isn't listed yet, under
+// another address or not
+async fn listed(state: &AppState, address: &str) -> Result<String, String> {
+    if address.is_empty() {
+        return Err("enter the IP address or hostname of the printer to copy to".into());
+    }
+    let same = |p: &&Printer| p.ip.eq_ignore_ascii_case(address);
+    if let Some(p) = state.printers.lock().unwrap().values().find(same) {
+        return Ok(p.ip.clone());
+    }
+    let id = printer::identify(address)
+        .await
+        .map_err(|e| format!("can't reach {address}: {e}"))?;
+    let mut printers = state.printers.lock().unwrap();
+    if let Some(p) = printers
+        .values()
+        .find(|p| id.serial.is_some() && p.serial == id.serial)
+    {
+        return Ok(p.ip.clone());
+    }
+    printers.insert(
+        address.to_string(),
+        Printer {
+            ip: address.to_string(),
+            model: id.model,
+            serial: id.serial,
+            firmware: id.firmware,
+            profile_id: None,
+            status: Status::Pending,
+            hostname: id.hostname,
+            ip_addr: id.ip_addr,
+        },
+    );
+    Ok(address.to_string())
 }
 
 // everything the printer page shows above the full settings list
@@ -431,40 +512,9 @@ fn forget_printer(
 }
 
 // what the Diagnose page shows about a printer when it's opened
-#[derive(Serialize)]
-struct Identity {
-    model: Option<String>,
-    serial: Option<String>,
-    hostname: Option<String>, // ip.hostname on Link-OS 7.6 and later, else the friendly name
-    ip_addr: Option<String>,
-}
-
 #[tauri::command]
-async fn identify(ip: String) -> Result<Identity, String> {
-    let v = printer::query(
-        &ip,
-        &[
-            "device.product_name",
-            "device.unique_id",
-            "ip.hostname",
-            "device.friendly_name",
-            "interface.network.active.ip_addr",
-        ],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let get = |k: &str| {
-        v[k].as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-    };
-    Ok(Identity {
-        model: get("device.product_name"),
-        serial: get("device.unique_id"),
-        hostname: get("ip.hostname").or_else(|| get("device.friendly_name")),
-        ip_addr: get("interface.network.active.ip_addr"),
-    })
+async fn identify(ip: String) -> Result<printer::Identity, String> {
+    printer::identify(&ip).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -555,7 +605,9 @@ pub fn run() {
             printer_raw,
             list_folders,
             save_folders,
-            apply_profile
+            apply_profile,
+            clone_source,
+            clone_printer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

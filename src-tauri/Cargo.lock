@@ -4966,7 +4966,7 @@ dependencies = [
 
 [[package]]
 name = "zebra_configure"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4977,6 +4977,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

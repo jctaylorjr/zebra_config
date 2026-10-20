@@ -19,8 +19,20 @@ pub struct Setting {
 }
 
 // print width in dots: whole inches at the printer's resolution, never more than its nominal
-// width. a ZD410 accepts 448 dots but is a 2 inch printer, so its widest is 2 x 203 = 406
+// width. a ZD410 accepts 448 dots but is a 2 inch printer, so its widest is 2 x 203 = 406. a
+// width copied from another printer is kept the same size at this one's resolution instead
 pub fn width(m: &Media, dpi: u32, max_dots: u32) -> Result<u32, String> {
+    if let Some(w) = m.exact_width {
+        let from = w.dpi.max(1);
+        let dots = (w.dots * dpi + from / 2) / from;
+        if dots == 0 || dots > max_dots {
+            return Err(format!(
+                "{} dots at {} dpi is wider than this printer's {max_dots} dots at {dpi} dpi",
+                w.dots, w.dpi
+            ));
+        }
+        return Ok(dots);
+    }
     let max_in = max_dots / dpi.max(1);
     let width_in = m.width_in.unwrap_or(max_in);
     if width_in == 0 || width_in > max_in {
@@ -111,12 +123,17 @@ pub fn settings(p: &Profile, target: Option<&Target>) -> Result<Vec<Setting>, St
         let sensor = match m.sensor {
             Sensor::Transmissive => "transmissive",
             Sensor::Reflective => "reflective",
+            Sensor::Auto => "auto",
         };
         let width = match target {
             Some(t) => width(m, t.dpi, t.max_dots)?.to_string(),
-            None => match m.width_in {
-                Some(w) => format!("{w} in x printer dpi"),
-                None => "printer's full width in whole inches".into(),
+            None => match (m.exact_width, m.width_in) {
+                (Some(w), _) => format!(
+                    "{} dots at {} dpi, the same size at printer dpi",
+                    w.dots, w.dpi
+                ),
+                (None, Some(w)) => format!("{w} in x printer dpi"),
+                (None, None) => "printer's full width in whole inches".into(),
             },
         };
         set("Media type", "ezpl.media_type", media_type.into());
@@ -174,6 +191,7 @@ mod tests {
     fn labels(width_in: Option<u32>) -> Profile {
         profile(Some(Media {
             width_in,
+            exact_width: None,
             media_type: MediaType::Gap,
             sensor: Sensor::Transmissive,
         }))
@@ -236,6 +254,7 @@ mod tests {
     fn wristbands_use_mark_sensing() {
         let p = profile(Some(Media {
             width_in: None,
+            exact_width: None,
             media_type: MediaType::Mark,
             sensor: Sensor::Reflective,
         }));
@@ -338,6 +357,7 @@ mod tests {
     fn continuous_media_sets_no_sense_mode() {
         let p = profile(Some(Media {
             width_in: Some(3),
+            exact_width: None,
             media_type: MediaType::Continuous,
             sensor: Sensor::Transmissive,
         }));
