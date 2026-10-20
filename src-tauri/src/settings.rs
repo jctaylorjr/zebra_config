@@ -3,11 +3,22 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
 use tauri::{AppHandle, Manager};
 
-// changed from the GUI, unlike profiles.json which is edited by hand
+// changed from the GUI: the Zebra folders and the app's preferences
 #[derive(Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_folders")]
     pub folders: Vec<Folder>,
+    #[serde(default)]
+    pub theme: Theme,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Default, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 // a USB mirror "Zebra" folder and the printers it's for
@@ -24,6 +35,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             folders: default_folders(),
+            theme: Theme::System,
         }
     }
 }
@@ -86,6 +98,7 @@ mod tests {
     #[test]
     fn each_model_family_gets_only_its_own_folder() {
         let s = Settings {
+            theme: Theme::System,
             folders: vec![
                 folder(&["ZD611", "ZD621"], Some("/zd")),
                 folder(&["ZT"], None),
@@ -106,6 +119,9 @@ mod tests {
     fn missing_settings_get_the_default_folders() {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.folders.len(), 2);
+        assert_eq!(s.theme, Theme::System);
+        let dark: Settings = serde_json::from_str(r#"{"theme": "dark"}"#).unwrap();
+        assert_eq!(dark.theme, Theme::Dark);
         assert!(s.folders.iter().all(|f| f.path.is_none()));
     }
 }

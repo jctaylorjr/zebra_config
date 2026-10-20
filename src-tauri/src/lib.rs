@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::{collections::HashMap, fs, path::Path, sync::Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 #[derive(Default)]
 pub struct AppState {
@@ -213,7 +214,10 @@ fn save_folders(
             return Err(format!("{path}: {e}"));
         }
     }
-    let new = settings::Settings { folders };
+    let new = settings::Settings {
+        folders,
+        theme: settings.theme,
+    };
     settings::save(&app, &new).map_err(|e| e.to_string())?;
     *settings = new;
     Ok(folder_views(&settings.folders))
@@ -315,6 +319,57 @@ async fn printer_raw(ip: String, command: String) -> Result<String, String> {
     printer::raw(&ip, line.as_bytes())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+struct Preferences {
+    theme: settings::Theme,
+    data_dir: String, // where profiles.json, settings.json and recent.json are kept
+}
+
+#[tauri::command]
+fn preferences(app: AppHandle, state: State<'_, AppState>) -> Preferences {
+    Preferences {
+        theme: state.settings.lock().unwrap().theme,
+        data_dir: app
+            .path()
+            .app_data_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+#[tauri::command]
+fn set_theme(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    theme: settings::Theme,
+) -> Result<(), String> {
+    let mut settings = state.settings.lock().unwrap();
+    let new = settings::Settings {
+        folders: settings.folders.clone(),
+        theme,
+    };
+    settings::save(&app, &new).map_err(|e| e.to_string())?;
+    *settings = new;
+    Ok(())
+}
+
+// opens the app's own data folder; the path never comes from the page
+#[tauri::command]
+fn open_data_folder(app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(dir.display().to_string(), None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn clear_recent(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let mut list = state.recent.lock().unwrap();
+    list.clear();
+    recent::save(&app, &list).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -468,6 +523,10 @@ pub fn run() {
             printer_settings,
             printer_action,
             printer_calibrate,
+            preferences,
+            set_theme,
+            open_data_folder,
+            clear_recent,
             recent_printers,
             remember_printer,
             forget_printer,

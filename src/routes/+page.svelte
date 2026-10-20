@@ -3,6 +3,7 @@
 	import { listen } from '@tauri-apps/api/event';
 	import { onMount } from 'svelte';
 	import { picks, selected } from '$lib/configure.svelte';
+	import { onShortcut } from '$lib/shortcuts';
 	import { dragSelect } from '$lib/selection';
 	import {
 		fits,
@@ -18,6 +19,7 @@
 	let profiles = $state<Profile[]>([]);
 	let folders = $state<FolderView[]>([]);
 	let ip = $state('');
+	let addressBox = $state<HTMLInputElement>();
 	let adding = $state(false);
 	let error = $state('');
 
@@ -33,8 +35,13 @@
 		const un = listen<Printer>('printer-update', (e) => {
 			printers = printers.map((x) => (x.ip === e.payload.ip ? e.payload : x));
 		});
+		const offs = [
+			onShortcut('refresh', async () => (printers = await invoke<Printer[]>('list_printers'))),
+			onShortcut('find', () => addressBox?.focus())
+		];
 		return () => {
 			un.then((f) => f());
+			offs.forEach((off) => off());
 		};
 	});
 
@@ -145,7 +152,7 @@
 		add();
 	}}
 >
-	<input bind:value={ip} placeholder="IP address or hostname" size="30" />
+	<input bind:this={addressBox} bind:value={ip} placeholder="IP address or hostname" size="30" />
 	<button type="submit" class="primary" disabled={adding || !ip.trim()}>
 		{adding ? 'Connecting…' : 'Add printer'}
 	</button>
@@ -184,7 +191,7 @@
 			<col style="width: 15%" />
 			<col style="width: 11%" />
 			<col />
-			<col style="width: 92px" />
+			<col style="width: 108px" />
 		</colgroup>
 		<thead>
 			<tr>
@@ -283,6 +290,9 @@
 	}
 	td select {
 		width: 100%;
+	}
+	td button {
+		white-space: nowrap;
 	}
 	tr.selected td {
 		background: color-mix(in srgb, var(--accent) 14%, var(--panel));

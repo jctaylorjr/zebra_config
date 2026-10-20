@@ -9,7 +9,9 @@
 	import RecentPrinters from '$lib/RecentPrinters.svelte';
 	import { copy } from '$lib/clipboard';
 	import { picks } from '$lib/configure.svelte';
+	import { focus } from '$lib/focus.svelte';
 	import { printerPage, viewFor } from '$lib/printer.svelte';
+	import { onShortcut } from '$lib/shortcuts';
 	import { recent, remember } from '$lib/recent.svelte';
 	import {
 		diagnoseHref,
@@ -164,10 +166,17 @@
 				x.ip === e.payload.ip ? e.payload : x
 			);
 		});
+		const offs = [
+			onShortcut('refresh', () => ip && refresh(ip)),
+			onShortcut('find', () => filterBox?.focus())
+		];
 		return () => {
 			un.then((f) => f());
+			offs.forEach((off) => off());
 		};
 	});
+
+	let filterBox = $state<HTMLInputElement>();
 
 	// opening a printer remembers it for the sidebar, reads it, and reads every setting the
 	// first time it's opened
@@ -182,9 +191,19 @@
 		});
 	});
 
+	// polls only while the window is focused and showing, and catches up when it's back
+	let paused = false;
 	$effect(() => {
 		if (!ip || !printerPage.autoRefresh) return;
+		if (!focus.active) {
+			paused = true;
+			return;
+		}
 		const target = ip;
+		if (paused) {
+			paused = false;
+			untrack(() => refresh(target));
+		}
 		const timer = setInterval(() => refresh(target), 5000);
 		return () => clearInterval(timer);
 	});
@@ -439,6 +458,9 @@
 		{/if}
 		<button onclick={() => refresh(ip)}>Refresh</button>
 		<label><input type="checkbox" bind:checked={printerPage.autoRefresh} /> Refresh every 5 s</label>
+		{#if printerPage.autoRefresh && !focus.active}
+			<span class="muted">Paused while the window isn't focused</span>
+		{/if}
 		{#if v.updated}<span class="muted">Updated {v.updated}</span>{/if}
 		{#if v.detailsError}<span class="error">{v.detailsError}</span>{/if}
 	</div>
@@ -584,7 +606,11 @@
 	<section class="card">
 		<div class="bar">
 			<h2>All settings</h2>
-			<input bind:value={v.filter} placeholder="Filter, e.g. wlan or 406" />
+			<input
+				bind:this={filterBox}
+				bind:value={v.filter}
+				placeholder="Filter, e.g. wlan or 406"
+			/>
 			<button onclick={() => loadAll(ip)} disabled={v.allLoading}
 				>{v.allLoading ? 'Reading…' : 'Reload'}</button
 			>

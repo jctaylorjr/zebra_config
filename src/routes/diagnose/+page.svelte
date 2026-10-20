@@ -17,6 +17,7 @@
 		runDiagnosis
 	} from '$lib/diagnose.svelte';
 	import { recent } from '$lib/recent.svelte';
+	import { onShortcut } from '$lib/shortcuts';
 	import {
 		diagnoseHref,
 		fits,
@@ -40,6 +41,13 @@
 			diagnosePage.profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
 			await loadChecks();
 		})();
+		const offs = [
+			onShortcut('run', () => {
+				if (ip && d && !d.running && picked.size > 0) start();
+			}),
+			onShortcut('refresh', () => ip && identify(ip))
+		];
+		return () => offs.forEach((off) => off());
 	});
 
 	// opening a printer remembers it for the sidebar

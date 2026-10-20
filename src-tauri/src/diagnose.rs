@@ -477,6 +477,7 @@ async fn connection(s: &mut Session<'_>, ctx: &Context) -> Option<Info> {
 
     let folders = settings::Settings {
         folders: ctx.folders.clone(),
+        ..Default::default()
     };
     if let Some(want) = folders
         .folder_for(Some(&info.model))

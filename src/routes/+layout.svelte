@@ -1,14 +1,19 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import { fly } from 'svelte/transition';
 	import { diagnosePage } from '$lib/diagnose.svelte';
 	import { printerPage } from '$lib/printer.svelte';
+	import '$lib/focus.svelte';
 	import { loadRecent } from '$lib/recent.svelte';
+	import { fire } from '$lib/shortcuts';
+	import { loadPrefs } from '$lib/theme.svelte';
 	import { toast } from '$lib/toast.svelte';
 	import { diagnoseHref, printerHref } from '$lib/types';
 
 	onMount(() => {
+		loadPrefs();
 		loadRecent();
 	});
 
@@ -63,16 +68,39 @@
 		e.preventDefault();
 		if (e.type === 'mouseup') e.button === 3 ? history.back() : history.forward();
 	}
+
+	// keyboard shortcuts; the Settings page lists them
+	function shortcut(e: KeyboardEvent) {
+		const mod = e.ctrlKey || e.metaKey;
+		const key = e.key.toLowerCase();
+		if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+			e.preventDefault();
+			if (e.key === 'ArrowLeft') history.back();
+			else history.forward();
+		} else if (mod && /^[1-5]$/.test(e.key)) {
+			e.preventDefault();
+			goto(linkFor(sections[Number(e.key) - 1].href));
+		} else if (e.key === 'F5' || (mod && key === 'r')) {
+			// would reload the whole app and lose what's on screen; refreshes the page's printer instead
+			e.preventDefault();
+			fire('refresh');
+		} else if (mod && key === 'f') {
+			e.preventDefault();
+			fire('find');
+		} else if (mod && key === 's') {
+			e.preventDefault();
+			fire('save');
+		} else if (mod && e.key === 'Enter') {
+			e.preventDefault();
+			fire('run');
+		}
+	}
 </script>
 
 <svelte:window
 	onmousedown={mouseNav}
 	onmouseup={mouseNav}
-	onkeydown={(e) => {
-		if (!e.altKey) return;
-		if (e.key === 'ArrowLeft') history.back();
-		if (e.key === 'ArrowRight') history.forward();
-	}}
+	onkeydown={shortcut}
 />
 
 <div class="app">
@@ -117,8 +145,9 @@
 		--ok: #1f8a4c;
 		color-scheme: light;
 	}
+	/* a theme picked on the Settings page wins over the system's */
 	@media (prefers-color-scheme: dark) {
-		:global(:root) {
+		:global(:root:not([data-theme='light'])) {
 			--bg: #14171c;
 			--panel: #1c2027;
 			--fg: #e6e9ef;
@@ -131,6 +160,19 @@
 			--ok: #4cc283;
 			color-scheme: dark;
 		}
+	}
+	:global(:root[data-theme='dark']) {
+		--bg: #14171c;
+		--panel: #1c2027;
+		--fg: #e6e9ef;
+		--muted: #98a2b3;
+		--border: #333a45;
+		--accent: #5b8ff0;
+		--accent-fg: #0d1117;
+		--danger: #ef6b77;
+		--warn: #e6a23c;
+		--ok: #4cc283;
+		color-scheme: dark;
 	}
 	:global(body) {
 		margin: 0;
@@ -174,12 +216,24 @@
 		opacity: 0.5;
 		cursor: default;
 	}
+	/* separate borders, since collapsed ones can't have rounded corners */
 	:global(table) {
-		border-collapse: collapse;
+		border-collapse: separate;
+		border-spacing: 0;
 		width: 100%;
 		background: var(--panel);
 		border: 1px solid var(--border);
 		border-radius: 8px;
+		overflow: hidden;
+	}
+	:global(tbody:last-child > tr:last-child > td) {
+		border-bottom: none;
+	}
+	:global(tbody:last-child > tr:last-child > td:first-child) {
+		border-bottom-left-radius: 7px;
+	}
+	:global(tbody:last-child > tr:last-child > td:last-child) {
+		border-bottom-right-radius: 7px;
 	}
 	:global(th),
 	:global(td) {
@@ -195,6 +249,9 @@
 	}
 	:global(code) {
 		font-size: 12px;
+	}
+	:global(a) {
+		color: var(--accent);
 	}
 	:global(.error) {
 		color: var(--danger);

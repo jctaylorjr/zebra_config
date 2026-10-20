@@ -22,8 +22,14 @@ The app has three pages, picked from the bar on the left:
   and each reply.
 - **Profiles** — add, edit and delete profiles, with a list of every setting the selected one changes.
   Export saves one profile or all of them to a file, for sharing; Import adds profiles from such
-  files to the list, to look over before saving.
-- **Settings** — the Zebra folder for each model family, and its firmware version.
+  files to the list, to look over before saving. The Zebra folders tab sets the folder for each
+  model family, and its firmware version.
+- **Settings** — light, dark or system theme, where the data is saved, and the keyboard shortcuts
+  (Ctrl+1–5 for the pages, F5 to refresh, Ctrl+F to filter, Ctrl+S to save, Ctrl+Enter to diagnose).
+
+The Printer page only polls its printer while the window is focused. Applying profiles and running
+diagnoses happen in the backend, so they carry on whichever page is open and whether or not the
+window has focus.
 
 ## What applying does
 
@@ -48,7 +54,7 @@ Unreachable printers are retried with backoff.
 Stored in the app data folder (`%APPDATA%\com.jt1280.zebra_configure` on Windows,
 `~/.local/share/com.jt1280.zebra_configure` on Linux):
 
-- `settings.json` — Zebra folders per model family and their firmware versions. Edited in the app.
+- `settings.json` — Zebra folders per model family, their firmware versions, and the theme.
 - `recent.json` — the last 20 printers opened on the Printer and Diagnose pages.
 - `profiles.json` — profiles. Edited in the app; it won't save over a file it couldn't read. Example:
 

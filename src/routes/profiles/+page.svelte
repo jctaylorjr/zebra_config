@@ -1,8 +1,11 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { beforeNavigate, goto } from '$app/navigation';
 	import { invoke } from '@tauri-apps/api/core';
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { onMount } from 'svelte';
+	import ZebraFolders from '$lib/ZebraFolders.svelte';
+	import { onShortcut } from '$lib/shortcuts';
 	import { notify } from '$lib/toast.svelte';
 	import type { Media, Profile, Setting } from '$lib/types';
 
@@ -166,8 +169,17 @@
 	}
 
 	let leaving = false;
+	let tab = $derived(page.url.searchParams.get('tab') === 'folders' ? 'folders' : 'profiles');
+
+	onMount(() =>
+		onShortcut('save', () => {
+			if (tab === 'profiles' && dirty && !loadError) save();
+		})
+	);
+
+	// switching tabs keeps the draft, so only leaving the page asks
 	beforeNavigate(({ to, cancel }) => {
-		if (!dirty || leaving || !to) return;
+		if (!dirty || leaving || !to || to.url.pathname === '/profiles') return;
 		cancel();
 		confirm('Leave without saving your profile changes?', { title: 'Unsaved changes' }).then(
 			(ok) => {
@@ -181,6 +193,21 @@
 
 <h1>Profiles</h1>
 
+<div class="tabs" role="tablist">
+	<a href="/profiles" role="tab" aria-selected={tab === 'profiles'} class:active={tab === 'profiles'}
+		>Profiles</a
+	>
+	<a
+		href="/profiles?tab=folders"
+		role="tab"
+		aria-selected={tab === 'folders'}
+		class:active={tab === 'folders'}>Zebra folders</a
+	>
+</div>
+
+{#if tab === 'folders'}
+	<ZebraFolders />
+{:else}
 {#if loadError}
 	<p class="error">{loadError}. Saving is turned off until the file is fixed or removed.</p>
 {/if}
@@ -397,8 +424,27 @@
 		<p class="muted">No profiles. Make one with New profile.</p>
 	{/if}
 </div>
+{/if}
 
 <style>
+	.tabs {
+		display: flex;
+		gap: 4px;
+		margin-bottom: 14px;
+		border-bottom: 1px solid var(--border);
+	}
+	.tabs a {
+		padding: 6px 14px;
+		color: var(--muted);
+		text-decoration: none;
+		border-bottom: 2px solid transparent;
+		margin-bottom: -1px;
+	}
+	.tabs a.active {
+		color: var(--accent);
+		border-bottom-color: var(--accent);
+		font-weight: 600;
+	}
 	.bar {
 		display: flex;
 		align-items: center;
