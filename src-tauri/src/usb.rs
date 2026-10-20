@@ -8,8 +8,8 @@ use std::{
 #[derive(Default)]
 pub struct Folder {
     pub firmware: Option<(String, Vec<u8>)>, // appl/
-    pub files: Vec<(String, Vec<u8>)>,    // files/, stored on E:
-    pub commands: Vec<(String, Vec<u8>)>, // commands/, run in filename order
+    pub files: Vec<(String, Vec<u8>)>,       // files/, stored on E:
+    pub commands: Vec<(String, Vec<u8>)>,    // commands/, run in filename order
 }
 
 // what the GUI shows about the chosen folder, without reading the firmware

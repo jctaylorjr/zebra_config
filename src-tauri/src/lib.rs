@@ -42,7 +42,12 @@ async fn add_printer(state: State<'_, AppState>, ip: String) -> Result<Printer, 
     }
     let info = printer::query(
         &ip,
-        &["device.product_name", "device.unique_id", "appl.name"],
+        &[
+            "device.product_name",
+            "device.unique_id",
+            "appl.name",
+            "interface.network.active.ip_addr",
+        ],
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -54,6 +59,7 @@ async fn add_printer(state: State<'_, AppState>, ip: String) -> Result<Printer, 
         firmware: get("appl.name"),
         profile_id: None,
         status: Status::Pending,
+        ip_addr: get("interface.network.active.ip_addr").filter(|a| worker::usable_address(a)),
     };
     let mut printers = state.printers.lock().unwrap();
     // the same printer can be entered by hostname or by IP, so compare serials too

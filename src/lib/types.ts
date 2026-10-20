@@ -12,6 +12,7 @@ export type Printer = {
 	firmware: string | null;
 	profile_id: string | null;
 	status: Status;
+	ip_addr: string | null; // the IP it last answered at
 };
 
 export type Network = {

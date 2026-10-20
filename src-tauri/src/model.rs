@@ -23,6 +23,8 @@ pub struct Printer {
     pub firmware: Option<String>,
     pub profile_id: Option<String>,
     pub status: Status,
+    #[serde(default)]
+    pub ip_addr: Option<String>, // the IP it last answered at, to look for it there if it moves
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

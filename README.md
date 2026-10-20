@@ -83,19 +83,27 @@ the branch.
 
 1. **Zebra folder** — the printer's model picks a folder laid out like a USB mirror stick:
    - `appl/` firmware, sent raw on port 9100, then the app waits for the printer to restart.
-     Skipped when the printer already reports the folder's firmware version.
+     Skipped when the printer already reports the folder's firmware version, or with none set,
+     the firmware file's name, as a USB mirror does.
    - `files/` stored on `E:`.
    - `commands/` sent in filename order. If one resets the printer (`device.reset` or `~JR`),
      the app waits for it to come back.
 2. **Profile** — hostname, darkness, network, media (type, sensor, print width) and any extra
    commands. The hostname goes to `ip.hostname` on Link-OS 7.6 and later, and to
-   `device.friendly_name` on every printer, since that is the hostname on older firmware.
+   `device.friendly_name` on every printer, since that is the hostname on older firmware. These
+   are sent just before the first command file that resets the printer, so that restart puts the
+   hostname and network settings into effect while the app is watching; with no such file they
+   go last, and take effect at the printer's next restart.
 3. **Checks** — every `setvar` is read back, and every file the folder puts on `E:` (including
    uploads inside command files, such as `WEBLINK1_CA.NRD`) must be there.
 4. **Calibrate and test print** — for media profiles, only if there is media and the head is
    closed. If the printer is stuck in an error, it is reset and left paused with nothing queued.
 
-Unreachable printers are retried with backoff.
+Unreachable printers are retried with backoff, at least every 20 seconds. A restart, a new name or
+a switch between wired and wireless can move a printer, so while it isn't answering the app also
+looks for it, by its serial, at the IPs it has answered at (including on the Printer and Diagnose
+pages) and under the names it may have now: the profile's hostname, `{model}-{serial}`, and its
+serial. When it answers somewhere else, its row moves there. The app still never scans the network.
 
 ## Settings
 
