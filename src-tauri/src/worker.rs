@@ -299,14 +299,7 @@ async fn calibrate_and_print(
     for (what, data) in [("Calibrating", "~JC"), ("Printing test label", label)] {
         step(what);
         printer::send(ip, data.as_bytes()).await.map_err(stopped)?;
-        // device.status reads "busy" until it's done
-        for _ in 0..60 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            h = printer::health(ip).await.map_err(stopped)?;
-            if h.status != "busy" {
-                break;
-            }
-        }
+        h = printer::wait_idle(ip, 60).await.map_err(stopped)?;
         if !h.errors.is_empty() || h.paused || h.status != "ready" {
             let problem = match h.errors.is_empty() {
                 true => h.status,
@@ -385,7 +378,7 @@ fn expected_settings(text: &str) -> Vec<(String, String)> {
 }
 
 // what the printer reads back can differ in case or format, e.g. "25.0" for "25"
-fn same_value(got: &str, want: &str) -> bool {
+pub fn same_value(got: &str, want: &str) -> bool {
     let got = got.trim();
     got.eq_ignore_ascii_case(want)
         || matches!((got.parse::<f64>(), want.parse::<f64>()), (Ok(a), Ok(b)) if a == b)

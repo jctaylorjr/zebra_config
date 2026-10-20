@@ -1,4 +1,5 @@
 mod actions;
+mod diagnose;
 mod model;
 mod printer;
 mod profiles;
@@ -10,7 +11,7 @@ mod worker;
 use model::{Printer, Profile, Status};
 use serde::Serialize;
 use std::{collections::HashMap, path::Path, sync::Mutex};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 pub struct AppState {
@@ -237,6 +238,11 @@ async fn printer_action(ip: String, action: actions::Action) -> Result<String, S
     actions::run(&ip, action).await
 }
 
+#[tauri::command]
+async fn printer_calibrate(ip: String, method: actions::Calibration) -> Result<String, String> {
+    actions::calibrate(&ip, method).await
+}
+
 // sends whatever was typed, ending the line the way the printer expects
 #[tauri::command]
 async fn printer_raw(ip: String, command: String) -> Result<String, String> {
@@ -246,10 +252,53 @@ async fn printer_raw(ip: String, command: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn diagnose_checks() -> Vec<diagnose::CheckInfo> {
+    diagnose::catalogue()
+}
+
+// streams each log line to the page as a "diagnose-log" event, tagged with `run` so the page
+// can ignore lines from a run it has moved on from
+#[tauri::command]
+async fn run_diagnostics(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ip: String,
+    checks: Vec<diagnose::Check>,
+    profile_id: Option<String>,
+    pc_offset_minutes: i32,
+    run: u32,
+) -> Result<Vec<diagnose::Finding>, String> {
+    let profile = profile_id.and_then(|id| {
+        state
+            .profiles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+    });
+    let ctx = diagnose::Context {
+        profile,
+        folders: state.settings.lock().unwrap().folders.clone(),
+        pc_offset_minutes,
+    };
+    let log = move |line: diagnose::LogLine| {
+        let _ = app.emit("diagnose-log", (run, line));
+    };
+    Ok(diagnose::run(&ip, &checks, &ctx, &log).await)
+}
+
+#[tauri::command]
+async fn apply_fix(ip: String, fix: diagnose::Fix) -> Result<String, String> {
+    diagnose::apply_fix(&ip, &fix).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .setup(|app| {
             let state = app.state::<AppState>();
@@ -270,6 +319,10 @@ pub fn run() {
             printer_details,
             printer_settings,
             printer_action,
+            printer_calibrate,
+            diagnose_checks,
+            run_diagnostics,
+            apply_fix,
             printer_raw,
             list_folders,
             save_folders,

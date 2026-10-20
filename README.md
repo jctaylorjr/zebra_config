@@ -8,6 +8,15 @@ The app has three pages, picked from the bar on the left:
 - **Configure** — add printers by IP address or hostname, pick a profile for each, choose whether
   to send the Zebra folder too, and apply. The app only ever talks to printers you enter; it
   never scans the network.
+- **Printer** — one printer's alerts, status, network, media and counters, every setting it reports,
+  and commands such as calibrate (choosing gap/notch, black mark, continuous or auto-detect), feed,
+  print the configuration label, pause and restart. Profiles can be applied from here too.
+- **Diagnose** — runs chosen checks on one printer and lists what's wrong, with fixes to apply and
+  links to Zebra's guides. Read-only checks cover errors and warnings, printer state, the
+  printhead, media settings and sensor, profile settings, memory, network, weblink, the clock,
+  printhead wear and restarts. Tests that feed media (feed, calibrate, printhead element test,
+  sensor profile) are opt-in and only run when media is loaded. A log shows every command sent
+  and each reply.
 - **Profiles** — add, edit and delete profiles, with a list of every setting the selected one changes.
 - **Settings** — the Zebra folder for each model family, and its firmware version.
 
@@ -60,7 +69,7 @@ bun install
 bun run tauri dev
 ```
 
-Tests: `cargo test` in `src-tauri`. One test talks to a real printer and only runs when asked:
+Tests: `cargo test` in `src-tauri`, and `bun run test` for the frontend. One test talks to a real printer and only runs when asked:
 
 ```sh
 ZEBRA_TEST_IP=192.168.1.50 ZEBRA_TEST_FOLDER=/path/to/Zebra \

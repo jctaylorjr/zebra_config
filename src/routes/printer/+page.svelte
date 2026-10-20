@@ -2,9 +2,22 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { invoke } from '@tauri-apps/api/core';
+	import { listen } from '@tauri-apps/api/event';
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { onMount, untrack } from 'svelte';
-	import { printerHref, type Details, type Printer, type PrinterSetting } from '$lib/types';
+	import { picks } from '$lib/configure.svelte';
+	import {
+		diagnoseHref,
+		fits,
+		folderFor,
+		printerHref,
+		statusText,
+		type Details,
+		type FolderView,
+		type Printer,
+		type PrinterSetting,
+		type Profile
+	} from '$lib/types';
 
 	let ip = $derived(page.url.searchParams.get('ip') ?? '');
 	let printers = $state<Printer[]>([]);
@@ -27,6 +40,14 @@
 	let rawCommand = $state('');
 	let rawReply = $state<string | null>(null);
 	let rawBusy = $state(false);
+
+	let profiles = $state<Profile[]>([]);
+	let folders = $state<FolderView[]>([]);
+	let setupError = $state('');
+	let calMethod = $state(''); // empty until picked: follows the printer's media type
+	let calBusy = $state(false);
+	let calNote = $state('');
+	let calError = $state('');
 
 	// the settings worth seeing first; the full list is further down
 	const groups: { title: string; rows: [string, string][] }[] = [
@@ -83,9 +104,16 @@
 	];
 	const keys = groups.flatMap((g) => g.rows.map((r) => r[1]));
 
+	// the odometer reports distances in centimetres
+	const distances = ['odometer.headclean', 'odometer.headnew', 'odometer.total_print_length'];
+
 	const show = (key: string, v: unknown) => {
 		if (v === null || v === undefined) return key === 'ip.hostname' ? 'not on this firmware' : '—';
 		const s = String(v);
+		if (distances.includes(key) && /^\d+$/.test(s)) {
+			const m = Number(s) / 100;
+			return `${Math.round(m).toLocaleString()} m (${Math.round(m * 3.28084).toLocaleString()} ft)`;
+		}
 		if (key === 'ip.primary_network') return s === '1' ? 'Wired' : s === '2' ? 'Wireless' : s;
 		if (key === 'wlan.signal_strength' && /^\d+$/.test(s)) return `${s}%`;
 		return s || '—';
@@ -93,7 +121,6 @@
 
 	// feeding commands check for media first; the rest just go
 	const actions: { id: string; label: string; feeds?: boolean; ask?: string; hint?: string }[] = [
-		{ id: 'calibrate', label: 'Calibrate', feeds: true },
 		{ id: 'feed', label: 'Feed a label', feeds: true },
 		{ id: 'test_label', label: 'Print test label', feeds: true },
 		{ id: 'config_label', label: 'Print configuration', feeds: true },
@@ -115,9 +142,78 @@
 		{ id: 'restart', label: 'Restart', ask: 'Restart the printer? It takes about a minute to come back.' }
 	];
 
-	onMount(async () => {
-		printers = await invoke<Printer[]>('list_printers');
+	onMount(() => {
+		(async () => {
+			printers = await invoke<Printer[]>('list_printers');
+			profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
+			folders = await invoke<FolderView[]>('list_folders');
+		})();
+		const un = listen<Printer>('printer-update', (e) => {
+			printers = printers.map((x) => (x.ip === e.payload.ip ? e.payload : x));
+		});
+		return () => {
+			un.then((f) => f());
+		};
 	});
+
+	let listed = $derived(printers.find((p) => p.ip === ip));
+	let fitting = $derived(profiles.filter((p) => fits(p.models, listed?.model ?? null)));
+	let folder = $derived(listed ? folderFor(folders, listed.model) : undefined);
+	let chosenProfile = $derived(listed ? (picks.profile[ip] ?? listed.profile_id ?? '') : '');
+
+	async function addToList() {
+		setupError = '';
+		try {
+			const p = await invoke<Printer>('add_printer', { ip });
+			printers = [...printers, p];
+		} catch (e) {
+			setupError = String(e);
+		}
+	}
+
+	async function applyProfile() {
+		setupError = '';
+		try {
+			await invoke('apply_profile', {
+				ip,
+				profileId: chosenProfile,
+				useFolder: picks.useFolder[ip] ?? true
+			});
+		} catch (e) {
+			setupError = String(e);
+		}
+	}
+
+	// the calibration method that matches what the printer is set to now
+	const methodFor: Record<string, string> = {
+		'gap/notch': 'gap',
+		mark: 'mark',
+		continuous: 'continuous',
+		auto_detect: 'auto'
+	};
+	let method = $derived(
+		calMethod || methodFor[String(details?.values['ezpl.media_type'] ?? '')] || 'gap'
+	);
+
+	async function calibrate() {
+		if (details && !(details.media && details.head_closed)) {
+			const why = details.head_closed ? 'doesn’t see any media' : 'has its head open';
+			const ok = await confirm(
+				`The printer ${why}. Calibrating now would leave it in an error. Calibrate anyway?`,
+				{ title: 'Calibrate' }
+			);
+			if (!ok) return;
+		}
+		calBusy = true;
+		calNote = calError = '';
+		try {
+			calNote = await invoke<string>('printer_calibrate', { ip, method });
+		} catch (e) {
+			calError = String(e);
+		}
+		calBusy = false;
+		refresh();
+	}
 
 	async function refresh() {
 		const target = ip;
@@ -156,6 +252,7 @@
 			all = null;
 			rawReply = null;
 			actionNote = actionError = '';
+			calMethod = calNote = calError = setupError = '';
 			refresh();
 			loadAll();
 		});
@@ -241,6 +338,7 @@
 		<input bind:value={typed} placeholder="or another IP / hostname" />
 		<button type="submit" disabled={!typed.trim()}>Open</button>
 	</form>
+	{#if ip}<a class="button" href={diagnoseHref(ip)}>Diagnose</a>{/if}
 </div>
 
 {#if !ip}
@@ -272,6 +370,66 @@
 	</section>
 
 	<div class="grid">
+		<section class="card">
+			<h2>Profile</h2>
+			{#if listed}
+				<div class="stack">
+					<select
+						value={chosenProfile}
+						onchange={(e) => (picks.profile[ip] = e.currentTarget.value)}
+					>
+						<option value="" disabled>Choose a profile…</option>
+						{#each fitting as pf}<option value={pf.id}>{pf.name}</option>{/each}
+					</select>
+					{#if folder}
+						<label>
+							<input
+								type="checkbox"
+								checked={picks.useFolder[ip] ?? true}
+								onchange={(e) => (picks.useFolder[ip] = e.currentTarget.checked)}
+							/>
+							Send the Zebra folder too
+						</label>
+					{/if}
+					<button
+						class="primary"
+						disabled={!chosenProfile || listed.status.state === 'Applying'}
+						onclick={applyProfile}>Apply profile</button
+					>
+					<span
+						class:error={listed.status.state === 'Failed'}
+						class:ok={listed.status.state === 'Applied'}>{statusText(listed.status)}</span
+					>
+				</div>
+			{:else}
+				<p class="muted">Profiles can be applied to printers in the Configure list.</p>
+				<button onclick={addToList}>Add {ip} to the list</button>
+			{/if}
+			{#if setupError}<p class="error">{setupError}</p>{/if}
+		</section>
+
+		<section class="card">
+			<h2>Calibrate</h2>
+			<div class="stack">
+				<select value={method} onchange={(e) => (calMethod = e.currentTarget.value)}>
+					<option value="gap">Gap/notch (transmissive sensor)</option>
+					<option value="mark">Black mark (reflective sensor)</option>
+					<option value="continuous">Continuous</option>
+					<option value="auto">Auto-detect</option>
+				</select>
+				<small class="muted"
+					>Also sets the printer's media type to this. Auto-detect can mistake the gaps between
+					wristbands for gap/notch media, so pick black mark for marked wristbands.</small
+				>
+				<button class="primary" disabled={calBusy} onclick={calibrate}>
+					{calBusy ? 'Calibrating…' : 'Calibrate'}
+				</button>
+				{#if calError}<span class="error">{calError}</span>{:else if calNote}<span class="ok"
+						>{calNote}</span
+					>{/if}
+			</div>
+		</section>
+
 		{#each groups as g}
 			<section class="card">
 				<h2>{g.title}</h2>
@@ -361,6 +519,23 @@
 	}
 	.bar h2 {
 		margin: 0;
+	}
+	a.button {
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 5px 12px;
+		color: inherit;
+		text-decoration: none;
+		background: var(--panel);
+	}
+	.stack {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 8px;
+	}
+	.stack select {
+		max-width: 100%;
 	}
 	.chip {
 		padding: 2px 10px;

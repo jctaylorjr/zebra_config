@@ -171,7 +171,7 @@ mod tests {
 
     fn target(dpi: u32, max_dots: u32) -> Target {
         Target {
-            serial: "50J173900310".into(),
+            serial: "ABC123456789".into(),
             dpi,
             max_dots,
             ip_hostname: false,
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                r#"! U1 setvar "device.friendly_name" "CSC50J173900310""#,
+                r#"! U1 setvar "device.friendly_name" "CSCABC123456789""#,
                 r#"! U1 setvar "internal_wired.ip.dhcp.option12" "on""#,
                 r#"! U1 setvar "wlan.ip.dhcp.option12" "on""#,
                 r#"! U1 setvar "print.tone" "25.0""#,
@@ -270,10 +270,10 @@ mod tests {
             ..target(203, 832)
         };
         let lines = commands(&p, &newer).unwrap();
-        assert_eq!(lines[0], r#"! U1 setvar "ip.hostname" "CSC50J173900310""#);
+        assert_eq!(lines[0], r#"! U1 setvar "ip.hostname" "CSCABC123456789""#);
         assert_eq!(
             lines[1],
-            r#"! U1 setvar "device.friendly_name" "CSC50J173900310""#
+            r#"! U1 setvar "device.friendly_name" "CSCABC123456789""#
         );
         // the preview can't know the firmware, so it lists both
         let keys: Vec<String> = settings(&p, None)

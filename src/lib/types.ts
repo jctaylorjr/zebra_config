@@ -93,3 +93,25 @@ export type Details = {
 export type PrinterSetting = { key: string; value: string; choices: string | null };
 
 export const printerHref = (ip: string) => `/printer?ip=${encodeURIComponent(ip)}`;
+
+// the diagnose page; see src-tauri/src/diagnose.rs
+export type CheckInfo = { id: string; label: string; about: string; feeds: boolean };
+
+export type Severity = 'error' | 'warning' | 'info' | 'ok';
+
+export type Finding = {
+	check: string;
+	severity: Severity;
+	title: string;
+	detail: string;
+	fix: ({ kind: string } & Record<string, unknown>) | null;
+	fix_label: string | null;
+	links: { title: string; url: string }[];
+};
+
+export type LogLine = {
+	kind: 'step' | 'send' | 'reply' | 'ok' | 'info' | 'warn' | 'error';
+	text: string;
+};
+
+export const diagnoseHref = (ip: string) => `/diagnose?ip=${encodeURIComponent(ip)}`;

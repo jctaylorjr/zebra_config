@@ -3,18 +3,25 @@
 
 	let { children } = $props();
 
+	// icons from Lucide (ISC) and Feather (MIT); the label printer is drawn for this app
 	const sections = [
 		{
 			href: '/',
 			label: 'Configure',
-			// printer
-			icon: '<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'
+			// clipboard with a check: set printers up from a profile
+			icon: '<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>'
 		},
 		{
 			href: '/printer',
 			label: 'Printer',
-			// pulse, for one printer's status and commands
-			icon: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>'
+			// a desktop label printer with a label coming out of its slot
+			icon: '<path d="M4 15a2 2 0 0 1-2-2v-3a5 5 0 0 1 5-5h10a5 5 0 0 1 5 5v3a2 2 0 0 1-2 2z"/><path d="M7 15v7h10v-7"/><path d="M9.5 17.5v2"/><path d="M12 17.5v2"/><path d="M14.5 17.5v2"/><path d="M16.5 9h1"/>'
+		},
+		{
+			href: '/diagnose',
+			label: 'Diagnose',
+			// stethoscope
+			icon: '<path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/>'
 		},
 		{
 			href: '/profiles',
