@@ -25,6 +25,7 @@ export type Network = {
 export type Media = {
 	width_in: number | null;
 	exact_width?: { dots: number; dpi: number } | null; // copied from another printer
+	max_length?: number | null; // in dots, as ^ML takes it; none leaves the printer's
 	media_type: 'gap' | 'mark' | 'continuous';
 	sensor: 'transmissive' | 'reflective' | 'auto';
 };

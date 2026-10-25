@@ -181,9 +181,72 @@ pub async fn calibrate(ip: &str, how: Calibration) -> Result<String, String> {
     )
 }
 
+// the settings the Printer page can change: print width, darkness (on either scale) and speed
+const EDITABLE: [&str; 4] = [
+    "ezpl.print_width",
+    "print.tone_zpl",
+    "print.tone",
+    "media.speed",
+];
+
+// the line that changes one of them, if the value is a number
+fn setvar(key: &str, value: &str) -> Result<String, String> {
+    if !EDITABLE.contains(&key) {
+        return Err(format!("{key} can't be changed here"));
+    }
+    if value.parse::<f64>().is_err() {
+        return Err(format!("{value} isn't a number"));
+    }
+    Ok(format!("! U1 setvar \"{key}\" \"{value}\"\r\n"))
+}
+
+// changes one setting, and returns what the printer reads back. a printer keeps its old value
+// rather than take one out of its range, so that's reported
+pub async fn set(ip: &str, key: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let line = setvar(key, value)?;
+    let failed = |e: anyhow::Error| e.to_string();
+    printer::send(ip, line.as_bytes()).await.map_err(failed)?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let got = printer::query(ip, &[key]).await.map_err(failed)?;
+    let now = got[key].as_str().unwrap_or("").trim().to_string();
+    match worker::same_value(&now, value) {
+        true => Ok(now),
+        false => Err(format!("the printer kept {now} rather than {value}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_width_darkness_and_speed_change_and_only_to_numbers() {
+        assert_eq!(
+            setvar("media.speed", "4").unwrap(),
+            "! U1 setvar \"media.speed\" \"4\"\r\n"
+        );
+        assert!(setvar("print.tone_zpl", "20.5").is_ok());
+        assert!(setvar("ezpl.print_width", "406").is_ok());
+        assert!(setvar("ezpl.print_width", "wide").is_err());
+        assert!(setvar("ip.primary_network", "1").is_err());
+        // a quote would end the value and start another command
+        assert!(setvar("media.speed", "4\" \"x").is_err());
+    }
+
+    // changes settings on a real printer, so it only runs when asked. each is key=value:
+    // ZEBRA_TEST_IP=192.168.1.50 ZEBRA_SET='media.speed=4 print.tone_zpl=20' \
+    //   cargo test set_on_printer -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn set_on_printer() {
+        let ip = std::env::var("ZEBRA_TEST_IP").expect("set ZEBRA_TEST_IP");
+        let sets = std::env::var("ZEBRA_SET").expect("set ZEBRA_SET");
+        for pair in sets.split_whitespace() {
+            let (key, value) = pair.split_once('=').expect("key=value");
+            println!("{key} = {value}: {:?}", set(&ip, key, value).await);
+        }
+    }
 
     #[test]
     fn buttons_map_to_the_right_commands() {

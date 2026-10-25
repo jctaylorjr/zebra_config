@@ -68,6 +68,10 @@ pub struct Media {
     // a width copied from another printer, used instead of width_in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_width: Option<ExactWidth>,
+    // the longest label it looks across for a gap or mark, in dots as ^ML takes it; wristbands
+    // are long. none leaves the printer's as it is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u32>,
     pub media_type: MediaType,
     pub sensor: Sensor,
 }

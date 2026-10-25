@@ -22,6 +22,11 @@ export type PrinterView = {
 	calNote: string;
 	calError: string;
 	setupError: string;
+	editing: string | null; // the setting being changed: print width, darkness or speed
+	editValue: string;
+	editBusy: boolean;
+	editNote: string;
+	editError: string;
 	unrecorded: boolean; // opened, but not yet added to the recent printers
 	autoRefresh: boolean | null; // null until changed: on, except for battery printers
 };
@@ -60,6 +65,11 @@ export function viewFor(ip: string): PrinterView {
 		calNote: '',
 		calError: '',
 		setupError: '',
+		editing: null,
+		editValue: '',
+		editBusy: false,
+		editNote: '',
+		editError: '',
 		unrecorded: true,
 		autoRefresh: null
 	};

@@ -142,8 +142,22 @@ pub fn settings(p: &Profile, target: Option<&Target>) -> Result<Vec<Setting>, St
         }
         set("Sensor", "device.sensor_select", sensor.into());
         set("Print width (dots)", "ezpl.print_width", width);
+        if let Some(dots) = m.max_length {
+            let inches = match target {
+                Some(t) => max_length_in(dots, t.dpi).to_string(),
+                None => format!("{dots} dots / printer dpi, in whole inches"),
+            };
+            set("Maximum label length (in)", "ezpl.label_length_max", inches);
+        }
     }
     Ok(out)
+}
+
+// a maximum label length in dots, as the printer keeps it: whole inches, rounded, so ^ML6000
+// on a 203 dpi printer reads back as 30
+pub fn max_length_in(dots: u32, dpi: u32) -> u32 {
+    let dpi = dpi.max(1);
+    ((dots + dpi / 2) / dpi).max(1)
 }
 
 // the lines to send: the settings, then a profile's extra commands
@@ -192,6 +206,7 @@ mod tests {
         profile(Some(Media {
             width_in,
             exact_width: None,
+            max_length: None,
             media_type: MediaType::Gap,
             sensor: Sensor::Transmissive,
         }))
@@ -255,6 +270,7 @@ mod tests {
         let p = profile(Some(Media {
             width_in: None,
             exact_width: None,
+            max_length: None,
             media_type: MediaType::Mark,
             sensor: Sensor::Reflective,
         }));
@@ -265,6 +281,32 @@ mod tests {
             lines[2],
             r#"! U1 setvar "device.sensor_select" "reflective""#
         );
+    }
+
+    #[test]
+    fn wristbands_set_a_long_maximum_label_length_in_whole_inches() {
+        let p = profile(Some(Media {
+            width_in: None,
+            exact_width: None,
+            max_length: Some(6000),
+            media_type: MediaType::Mark,
+            sensor: Sensor::Reflective,
+        }));
+        // what a ZD410 reads back after ^ML6000
+        assert_eq!(
+            lines(&p, &target(203, 448)).last().unwrap(),
+            r#"! U1 setvar "ezpl.label_length_max" "30""#
+        );
+        assert_eq!(
+            lines(&p, &target(300, 1280)).last().unwrap(),
+            r#"! U1 setvar "ezpl.label_length_max" "20""#
+        );
+        let preview = settings(&p, None).unwrap();
+        assert_eq!(
+            preview.last().unwrap().value,
+            "6000 dots / printer dpi, in whole inches"
+        );
+        assert_eq!(max_length_in(1, 203), 1);
     }
 
     #[test]
@@ -358,6 +400,7 @@ mod tests {
         let p = profile(Some(Media {
             width_in: Some(3),
             exact_width: None,
+            max_length: None,
             media_type: MediaType::Continuous,
             sensor: Sensor::Transmissive,
         }));

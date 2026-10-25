@@ -77,6 +77,11 @@ pub fn validate(profiles: &[Profile]) -> Result<(), String> {
         if p.media.as_ref().is_some_and(|m| m.width_in == Some(0)) {
             return Err(format!("{name}: media width must be at least 1 inch"));
         }
+        if p.media.as_ref().is_some_and(|m| m.max_length == Some(0)) {
+            return Err(format!(
+                "{name}: the maximum label length must be at least 1 dot"
+            ));
+        }
     }
     Ok(())
 }
@@ -126,6 +131,7 @@ pub fn template() -> Profile {
         media: Some(Media {
             width_in: Some(2),
             exact_width: None,
+            max_length: None,
             media_type: MediaType::Gap,
             sensor: Sensor::Transmissive,
         }),
@@ -139,13 +145,14 @@ fn defaults() -> Vec<Profile> {
 
 // the label and wristband setups for ZD printers
 fn media_defaults() -> Vec<Profile> {
-    let zd = |id: &str, name: &str, width_in, media_type, sensor| Profile {
+    let zd = |id: &str, name: &str, width_in, max_length, media_type, sensor| Profile {
         id: id.into(),
         name: name.into(),
         models: vec!["ZD".into()],
         media: Some(Media {
             width_in,
             exact_width: None,
+            max_length,
             media_type,
             sensor,
         }),
@@ -156,6 +163,7 @@ fn media_defaults() -> Vec<Profile> {
             "zd-2x1",
             "2x1 labels",
             Some(2),
+            None,
             MediaType::Gap,
             Sensor::Transmissive,
         ),
@@ -163,13 +171,16 @@ fn media_defaults() -> Vec<Profile> {
             "zd-4x1",
             "4x1 labels",
             Some(4),
+            None,
             MediaType::Gap,
             Sensor::Transmissive,
         ),
+        // wristbands are long, so the printer has to look a long way for the next mark
         zd(
             "zd-wristband",
             "Wristbands",
             None,
+            Some(6000),
             MediaType::Mark,
             Sensor::Reflective,
         ),
@@ -199,6 +210,11 @@ mod tests {
             .map(|p| p.media.as_ref().unwrap().width_in)
             .collect();
         assert_eq!(widths, [Some(2), Some(4), None]);
+        let longest: Vec<Option<u32>> = back
+            .iter()
+            .map(|p| p.media.as_ref().unwrap().max_length)
+            .collect();
+        assert_eq!(longest, [None, None, Some(6000)]);
         // every printer gets the same hostname, darkness and network setup
         assert!(back.iter().all(|p| {
             p.hostname.as_deref() == Some("CSC{serial}")
@@ -294,6 +310,7 @@ mod tests {
         let zero = Media {
             width_in: Some(0),
             exact_width: None,
+            max_length: None,
             media_type: MediaType::Gap,
             sensor: Sensor::Transmissive,
         };

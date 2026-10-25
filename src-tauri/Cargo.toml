@@ -1,6 +1,6 @@
 [package]
 name = "zebra_configure"
-version = "0.3.0"
+version = "0.3.1"
 description = "Configures Zebra printers over the network"
 authors = ["jctaylorjr"]
 edition = "2024"

@@ -11,7 +11,9 @@ The app has six pages, picked from the bar on the left:
   enter, at the addresses they've had and under the names they may have.
 - **Printer** — one printer's alerts, status, network, media and counters, every setting it reports,
   and commands such as calibrate (choosing gap/notch, black mark, continuous or auto-detect), feed,
-  print the configuration label, pause and restart. Profiles can be applied from here too, each
+  print the configuration label, pause and restart. Print width, darkness and speed can be changed
+  in place, with the range the printer accepts beside them; each change is read back, and a value
+  the printer won't take is reported. Profiles can be applied from here too, each
   block of details copies to the clipboard, and the printer's own web page opens in the browser.
   Factory reset puts the printer settings (`^JUF`) or the network settings (`^JUN`, then a
   restart) back to Zebra's defaults.
@@ -97,7 +99,8 @@ the branch.
    - `files/` stored on `E:`.
    - `commands/` sent in filename order. If one resets the printer (`device.reset` or `~JR`),
      the app waits for it to come back.
-2. **Profile** — hostname, darkness, network, media (type, sensor, print width) and any extra
+2. **Profile** — hostname, darkness, network, media (type, sensor, print width, maximum label
+   length) and any extra
    commands. The hostname goes to `ip.hostname` on Link-OS 7.6 and later, and to
    `device.friendly_name` on every printer, since that is the hostname on older firmware. These
    are sent just before the first command file that resets the printer, so that restart puts the
@@ -149,7 +152,10 @@ Stored in the app data folder (`%APPDATA%\com.jt1280.zebra-configure` on Windows
 
 Every part after `models` is optional; leave one out and the app doesn't touch those settings.
 `models` are matched as substrings of the printer's model. Leave out `width_in` to use the
-printer's full width in whole inches (406 dots on a 2 inch 203 dpi printer).
+printer's full width in whole inches (406 dots on a 2 inch 203 dpi printer). `media` can also have
+`max_length`, the maximum label length in dots as `^ML` takes it: how far the printer looks for the
+next gap or mark, which long media needs. The wristband profile uses 6000. Printers keep it in
+whole inches, so 6000 is set as 30 on a 203 dpi printer and 20 on a 300 dpi one.
 
 ## Development
 

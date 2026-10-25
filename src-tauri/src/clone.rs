@@ -15,7 +15,7 @@ const PLAIN: [(&str, &str); 10] = [
     ("zpl.print_orientation", "Orientation"),
     ("ezpl.head_close_action", "When the head is closed"),
     ("ezpl.power_up_action", "When turned on"),
-    ("ezpl.label_length_max", "Longest label (in)"),
+    ("ezpl.label_length_max", "Maximum label length (in)"),
 ];
 
 // the rest of what's read from the printer cloned from
@@ -140,6 +140,7 @@ fn media(v: &serde_json::Value) -> Option<Media> {
     Some(Media {
         width_in: None,
         exact_width: Some(ExactWidth { dots, dpi }),
+        max_length: None,
         media_type,
         sensor,
     })

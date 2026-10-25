@@ -378,6 +378,22 @@
 							<option value="reflective">Reflective</option>
 						</select>
 					</label>
+					<label
+						class="field inline"
+						title="Maximum label length: how far the printer looks for the next gap or mark, as ^ML sets it. Long media like wristbands needs more; blank leaves the printer's as it is"
+					>
+						<span>Max length</span>
+						<input
+							type="number"
+							min="1"
+							step="1"
+							placeholder="as it is"
+							value={p.media.max_length ?? ''}
+							onchange={(e) =>
+								p.media && (p.media.max_length = Math.round(Number(e.currentTarget.value)) || null)}
+						/>
+						<small class="muted">dots</small>
+					</label>
 					<small class="muted">Calibrates and prints a test label when media is loaded.</small>
 				{/if}
 			</fieldset>

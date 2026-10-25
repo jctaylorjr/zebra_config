@@ -372,6 +372,42 @@
 		refresh(target);
 	}
 
+	// print width, darkness and speed can be changed here. darkness is print.tone on printers
+	// without print.tone_zpl
+	const editable = ['ezpl.print_width', 'print.tone_zpl', 'media.speed'];
+	const keyFor = (key: string) =>
+		key === 'print.tone_zpl' && v?.details?.values['print.tone_zpl'] == null ? 'print.tone' : key;
+	// what the printer accepts, from its full settings list once that's read, e.g. "2-448"
+	const range = (key: string) =>
+		v?.all?.find((s) => s.key === keyFor(key))?.choices?.replace('-', '–') ?? '';
+
+	function edit(key: string) {
+		const view = viewFor(ip);
+		view.editing = key;
+		view.editValue = show(key, view.details?.values[key]);
+		view.editNote = view.editError = '';
+	}
+
+	async function save(label: string, key: string) {
+		const target = ip;
+		const view = viewFor(target);
+		view.editBusy = true;
+		view.editNote = view.editError = '';
+		try {
+			const now = await invoke<string>('printer_set', {
+				ip: target,
+				key: keyFor(key),
+				value: view.editValue
+			});
+			view.editNote = `${label} is now ${now}`;
+			view.editing = null;
+		} catch (e) {
+			view.editError = `${label}: ${e}`;
+		}
+		view.editBusy = false;
+		refresh(target);
+	}
+
 	async function sendRaw() {
 		const target = ip;
 		const view = viewFor(target);
@@ -600,9 +636,41 @@
 				<dl>
 					{#each g.rows as [label, key]}
 						<dt title={key}>{label}</dt>
-						<dd>{v.details ? show(key, v.details.values[key]) : '…'}</dd>
+						<dd>
+							{#if v.editing === key}
+								<form
+									class="edit"
+									onsubmit={(e) => {
+										e.preventDefault();
+										save(label, key);
+									}}
+								>
+									<!-- svelte-ignore a11y_autofocus -->
+									<input bind:value={v.editValue} aria-label={label} autofocus />
+									{#if range(key)}<span class="muted">{range(key)}</span>{/if}
+									<button type="submit" class="primary" disabled={v.editBusy}>
+										{v.editBusy ? 'Saving…' : 'Save'}
+									</button>
+									<button type="button" onclick={() => (v.editing = null)}>Cancel</button>
+								</form>
+							{:else}
+								{v.details ? show(key, v.details.values[key]) : '…'}
+								{#if editable.includes(key) && v.details && v.editing === null}
+									<button class="change" title="Change {label.toLowerCase()}" onclick={() => edit(key)}
+										>Change</button
+									>
+								{/if}
+							{/if}
+						</dd>
 					{/each}
 				</dl>
+				{#if g.rows.some(([, key]) => editable.includes(key))}
+					{#if v.editError}<p class="error small">{v.editError}</p>{:else if v.editNote}<p
+							class="ok small"
+						>
+							{v.editNote}
+						</p>{/if}
+				{/if}
 			</section>
 		{/each}
 	</div>
@@ -828,6 +896,24 @@
 	dd {
 		margin: 0;
 		overflow-wrap: anywhere;
+	}
+	.change {
+		margin-left: 6px;
+		padding: 0 8px;
+		font-size: 12px;
+	}
+	.edit {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+	}
+	.edit input {
+		width: 70px;
+	}
+	.small {
+		font-size: 12px;
+		margin: 8px 0 0;
 	}
 	.actions {
 		display: flex;

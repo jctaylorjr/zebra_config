@@ -408,6 +408,12 @@ async fn printer_calibrate(ip: String, method: actions::Calibration) -> Result<S
     actions::calibrate(&ip, method).await
 }
 
+// print width, darkness or speed, changed on the Printer page; returns what it reads back
+#[tauri::command]
+async fn printer_set(ip: String, key: String, value: String) -> Result<String, String> {
+    actions::set(&ip, &key, &value).await
+}
+
 // sends whatever was typed, ending the line the way the printer expects
 #[tauri::command]
 async fn printer_raw(ip: String, command: String) -> Result<String, String> {
@@ -591,6 +597,7 @@ pub fn run() {
             printer_settings,
             printer_action,
             printer_calibrate,
+            printer_set,
             preferences,
             set_theme,
             open_data_folder,
