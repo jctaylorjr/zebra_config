@@ -280,6 +280,9 @@ try {
         $setup = Get-ChildItem (Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis') -Filter '*-setup.exe' |
             Sort-Object LastWriteTime | Select-Object -Last 1
         Copy-Item $setup.FullName $dist -Force
+        # only the version just built is kept
+        Get-ChildItem $dist, $setup.DirectoryName -Filter '*-setup.exe' |
+            Where-Object { $_.Name -ne $setup.Name } | Remove-Item
         Write-Host "    $(Join-Path $dist $setup.Name)"
     }
     if ($restart) {
