@@ -5,15 +5,18 @@ USB mirror stick had been plugged into each one.
 
 The app has six pages, picked from the bar on the left:
 
-- **Configure** — add printers by IP address or hostname, pick a profile for each, choose whether
-  to send the Zebra folder too, and apply. Each row shows the printer's hostname and IP under the
+- **Configure** — add printers by IP address, hostname or [control number](#control-numbers), pick
+  a profile for each, choose whether to flash each one from its model's Zebra folder, as if you had
+  plugged that USB stick into it, and apply. Each row shows the printer's hostname and IP under the
   address it's listed by. The app never scans the network: it only talks to the printers you
   enter, at the addresses they've had and under the names they may have.
 - **Printer** — one printer's alerts, status, network, media and counters, every setting it reports,
   and commands such as calibrate (choosing gap/notch, black mark, continuous or auto-detect), feed,
   print the configuration label, pause and restart. Print width, darkness and speed can be changed
   in place, with the range the printer accepts beside them; each change is read back, and a value
-  the printer won't take is reported. Profiles can be applied from here too, each
+  the printer won't take is reported. A profile can be applied from here too, to any printer:
+  one that isn't in the Configure list isn't added to it, and its progress shows here. Flashing
+  from the Zebra folder is off here until ticked. Each
   block of details copies to the clipboard, and the printer's own web page opens in the browser.
   Factory reset puts the printer settings (`^JUF`) or the network settings (`^JUN`, then a
   restart) back to Zebra's defaults.
@@ -33,8 +36,10 @@ The app has six pages, picked from the bar on the left:
   orientation, what it does when turned on or the head is closed, and the longest label. The hostname
   is copied as it is, even though it holds the other printer's serial. Read the printer to copy
   from, untick anything to leave alone, and clone; the printer copied to joins the Configure list,
-  and the settings are applied as a profile would be, with a restart so the name takes effect.
-  Two printers can't share a name, so take the old one off the network once the loaner is set up.
+  and the settings are applied as a profile would be, with a restart so the name takes effect, and
+  flashing from its model's Zebra folder if ticked. Either printer can be given by its control
+  number. Two printers can't share a name, so take the old one off the network once the loaner is
+  set up.
 - **Settings** — light, dark or system theme, where the data is saved, and the keyboard shortcuts
   (Ctrl+1–6 for the pages, F5 to refresh, Ctrl+F to filter, Ctrl+S to save, Ctrl+Enter to diagnose).
 
@@ -53,6 +58,24 @@ notification area until they're done; it then quits, or stays there if any faile
   battery printer unless asked, since polling keeps it from turning itself off when idle.
 - Diagnose checks the battery's health and charge, and whether the printer is in a ZPL mode; many
   mobile printers ship in CPCL line print, where the ZPL commands this app sends don't run.
+
+### Control numbers
+
+Every box that takes a printer's address also takes its control number, the number on its asset
+label, like 722858. ServiceNow names each printer's record by its control number and has its serial,
+so the app looks the number up there, then tries the names the printer may answer to: CSC and its
+serial (how new printers are named), its model and serial (how Link-OS 7.6 names one until it's
+given a name), and CSC and the control number, with or without a dash. It takes the one that answers
+with that serial, and says where ServiceNow has the printer. When ServiceNow has no serial for the
+number, or can't be reached, it takes a printer that calls itself CSC722858 or CSC-722858. A name
+typed like CSC722858 that no printer answers to is looked up by its number the same way.
+
+The app asks ServiceNow as you, through Microsoft Edge. It starts Edge out of sight with a profile of
+its own (`browser-edge` in the app data folder), opens partnershealthcare.service-now.com there, and
+reads the printer records through ServiceNow's Table API with that session's token. Single sign-on
+usually signs it in by itself; when it can't, the Edge window comes up for you to sign in, and hides
+again once you have. Edge closes when the app does. The app only reads printer records
+(`cmdb_ci_printer`); it never changes anything in ServiceNow.
 
 ## Installing
 
@@ -92,7 +115,9 @@ the branch.
 
 ## What applying does
 
-1. **Zebra folder** — the printer's model picks a folder laid out like a USB mirror stick:
+1. **Zebra folder**, when ticked: the printer is flashed as if you had plugged its model's USB
+   mirror stick into it. Configure ticks it for every printer whose model has a folder, and the
+   Printer page leaves it unticked. The printer's model picks a folder laid out like the stick:
    - `appl/` firmware, sent raw on port 9100, then the app waits for the printer to restart.
      Skipped when the printer already reports the folder's firmware version, or with none set,
      the firmware file's name, as a USB mirror does.
@@ -102,7 +127,9 @@ the branch.
 2. **Profile** — hostname, darkness, network, media (type, sensor, print width, maximum label
    length) and any extra
    commands. The hostname goes to `ip.hostname` on Link-OS 7.6 and later, and to
-   `device.friendly_name` on every printer, since that is the hostname on older firmware. These
+   `device.friendly_name` on every printer, since that is the hostname on older firmware. It's
+   set in capitals, whichever way the profile has it (`csc{serial}` sets CSCDGN260506471), and
+   names are compared without regard to case. These
    are sent just before the first command file that resets the printer, so that restart puts the
    hostname and network settings into effect while the app is watching. When nothing restarts
    the printer after them and the profile changes a hostname or network setting the printer
@@ -135,6 +162,7 @@ Stored in the app data folder (`%APPDATA%\com.jt1280.zebra-configure` on Windows
 
 - `settings.json` — Zebra folders per model family, their firmware versions, and the theme.
 - `recent.json` — the last 20 printers opened on the Printer and Diagnose pages.
+- `browser-edge` — the Edge profile the app reaches ServiceNow through, so its sign-in lasts.
 - `profiles.json` — profiles. Edited in the app; it won't save over a file it couldn't read. Example:
 
 ```json
@@ -178,4 +206,13 @@ make, optionally under another name, and apply it with the test above:
 
 ```sh
 ZEBRA_CLONE_FROM=192.168.1.50 ZEBRA_CLONE_NAME=TEST1 cargo test clone_profile -- --ignored --nocapture
+```
+
+To look up a control number as the app would, or to read ServiceNow's Table API directly (a path a
+line), both through the app's Edge profile and signed in as you:
+
+```sh
+ZEBRA_FIND=722858 cargo test find_printer -- --ignored --nocapture
+ZEBRA_SN_GET='/api/now/table/cmdb_ci_printer?sysparm_query=name%3D722858&sysparm_limit=5' \
+cargo test ask_servicenow -- --ignored --nocapture
 ```

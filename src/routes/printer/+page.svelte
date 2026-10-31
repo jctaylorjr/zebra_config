@@ -6,6 +6,7 @@
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { onMount, untrack } from 'svelte';
+	import OpenPrinter from '$lib/OpenPrinter.svelte';
 	import RecentPrinters from '$lib/RecentPrinters.svelte';
 	import { copy } from '$lib/clipboard';
 	import { follow, picks } from '$lib/configure.svelte';
@@ -16,7 +17,9 @@
 	import {
 		diagnoseHref,
 		fits,
+		flashHint,
 		folderFor,
+		folderLabel,
 		printerHref,
 		recentLabel,
 		statusText,
@@ -184,10 +187,12 @@
 			printerPage.profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
 			printerPage.folders = await invoke<FolderView[]>('list_folders');
 		})();
+		// including ones given a profile here, which aren't in the Configure list
 		const un = listen<Printer>('printer-update', (e) => {
-			printerPage.printers = printerPage.printers.map((x) =>
-				x.ip === e.payload.ip ? e.payload : x
-			);
+			const known = printerPage.printers.some((x) => x.ip === e.payload.ip);
+			printerPage.printers = known
+				? printerPage.printers.map((x) => (x.ip === e.payload.ip ? e.payload : x))
+				: [...printerPage.printers, e.payload];
 		});
 		const unMoved = listen<Moved>('printer-moved', (e) => {
 			const { from, printer } = e.payload;
@@ -243,12 +248,24 @@
 		return () => clearInterval(timer);
 	});
 
-	let listed = $derived(printerPage.printers.find((p) => p.ip === ip));
-	let fitting = $derived(
-		printerPage.profiles.filter((p) => fits(p.models, listed?.model ?? null))
-	);
-	let folder = $derived(listed ? folderFor(printerPage.folders, listed.model) : undefined);
-	let chosenProfile = $derived(listed ? (picks.profile[ip] ?? listed.profile_id ?? '') : '');
+	// a setting as the printer last reported it, or '' if it hasn't
+	const value = (k: string) => {
+		const x = v?.details?.values[k];
+		return typeof x === 'string' ? x.trim() : '';
+	};
+
+	// the app's own record of this printer, under this address or another, if it's in the
+	// Configure list or has been given a profile here
+	let row = $derived.by(() => {
+		const serial = value('device.unique_id');
+		return printerPage.printers.find(
+			(p) => p.ip.toLowerCase() === ip.toLowerCase() || (!!serial && p.serial === serial)
+		);
+	});
+	let model = $derived(row?.model ?? (value('device.product_name') || null));
+	let fitting = $derived(printerPage.profiles.filter((p) => fits(p.models, model)));
+	let folder = $derived(model ? folderFor(printerPage.folders, model) : undefined);
+	let chosenProfile = $derived(picks.profile[ip] ?? row?.profile_id ?? '');
 
 	// each of these writes to the view of the printer it started on, even if another printer
 	// is open by the time it finishes
@@ -294,22 +311,26 @@
 		const view = viewFor(ip);
 		view.setupError = '';
 		try {
-			const p = await invoke<Printer>('add_printer', { ip });
-			printerPage.printers = [...printerPage.printers, p];
+			await invoke<Printer>('add_printer', { ip });
+			printerPage.printers = await invoke<Printer[]>('list_printers');
 		} catch (e) {
 			view.setupError = String(e);
 		}
 	}
 
+	// whether it's in the Configure list or not; one that isn't is followed here without being
+	// added there
 	async function applyProfile() {
-		const view = viewFor(ip);
+		const target = ip;
+		const view = viewFor(target);
 		view.setupError = '';
 		try {
-			await invoke('apply_profile', {
-				ip,
+			await invoke<string>('apply_profile', {
+				ip: target,
 				profileId: chosenProfile,
-				useFolder: picks.useFolder[ip] ?? true
+				useFolder: !!folder && view.flash
 			});
+			printerPage.printers = await invoke<Printer[]>('list_printers');
 		} catch (e) {
 			view.setupError = String(e);
 		}
@@ -455,18 +476,19 @@
 		if (target.trim()) goto(printerHref(target.trim()));
 	}
 
+	// how a control number typed in the box led to the printer opened
+	let found = $state<{ address: string; note: string } | null>(null);
+
 	// the hostname, with the IP address beside it once the printer has answered
-	const value = (k: string) => {
-		const x = v?.details?.values[k];
-		return typeof x === 'string' ? x.trim() : '';
-	};
 	let name = $derived(value('ip.hostname') || value('device.friendly_name') || ip);
 	let address = $derived(value('interface.network.active.ip_addr'));
 	let heading = $derived(address && address !== name ? `${name} (${address})` : name);
 
+	// printers given a profile here aren't in the Configure list
+	let listed = $derived(printerPage.printers.filter((p) => !p.hidden));
 	let recentOthers = $derived(
 		recent.list.filter(
-			(r) => !printerPage.printers.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
+			(r) => !listed.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
 		)
 	);
 
@@ -493,9 +515,9 @@
 	</h1>
 	<select value={ip} onchange={(e) => open(e.currentTarget.value)}>
 		<option value="" disabled>Choose a printer…</option>
-		{#if printerPage.printers.length}
+		{#if listed.length}
 			<optgroup label="Configure list">
-				{#each printerPage.printers as p}
+				{#each listed as p}
 					<option value={p.ip}>{p.ip}{p.model ? ` · ${p.model}` : ''}</option>
 				{/each}
 			</optgroup>
@@ -506,15 +528,13 @@
 			</optgroup>
 		{/if}
 	</select>
-	<form
-		onsubmit={(e) => {
-			e.preventDefault();
-			open(printerPage.typed);
+	<OpenPrinter
+		bind:typed={printerPage.typed}
+		onopen={(address, note) => {
+			found = { address, note };
+			open(address);
 		}}
-	>
-		<input bind:value={printerPage.typed} placeholder="or another IP / hostname" />
-		<button type="submit" disabled={!printerPage.typed.trim()}>Open</button>
-	</form>
+	/>
 	{#if ip}
 		<a class="button" href={diagnoseHref(ip)}>Diagnose</a>
 		<button onclick={() => openUrl(`http://${ip}`)} title="The printer's own web page"
@@ -522,6 +542,7 @@
 		>
 	{/if}
 </div>
+{#if ip && found?.address === ip && found.note}<p class="ok found">{found.note}</p>{/if}
 
 {#if !ip}
 	<p class="muted">
@@ -569,38 +590,42 @@
 	<div class="grid">
 		<section class="card">
 			<h2>Profile</h2>
-			{#if listed}
-				<div class="stack">
-					<select
-						value={chosenProfile}
-						onchange={(e) => (picks.profile[ip] = e.currentTarget.value)}
-					>
-						<option value="" disabled>Choose a profile…</option>
-						{#each fitting as pf}<option value={pf.id}>{pf.name}</option>{/each}
-					</select>
-					{#if folder}
-						<label>
-							<input
-								type="checkbox"
-								checked={picks.useFolder[ip] ?? true}
-								onchange={(e) => (picks.useFolder[ip] = e.currentTarget.checked)}
-							/>
-							Send the Zebra folder too
-						</label>
-					{/if}
-					<button
-						class="primary"
-						disabled={!chosenProfile || listed.status.state === 'Applying'}
-						onclick={applyProfile}>Apply profile</button
-					>
+			<div class="stack">
+				<select
+					value={chosenProfile}
+					onchange={(e) => (picks.profile[ip] = e.currentTarget.value)}
+				>
+					<option value="" disabled>Choose a profile…</option>
+					{#each fitting as pf}<option value={pf.id}>{pf.name}</option>{/each}
+				</select>
+				{#if folder}
+					<label title={folder.path}>
+						<input
+							type="checkbox"
+							checked={v.flash}
+							onchange={(e) => (viewFor(ip).flash = e.currentTarget.checked)}
+						/>
+						Flash it from the {folderLabel(folder)} too, as if you had used that USB stick
+					</label>
+					{#if v.flash}<small class="muted">{flashHint}</small>{/if}
+				{/if}
+				<button
+					class="primary"
+					disabled={!chosenProfile || row?.status.state === 'Applying'}
+					onclick={applyProfile}>Apply profile</button
+				>
+				{#if row}
 					<span
-						class:error={listed.status.state === 'Failed'}
-						class:ok={listed.status.state === 'Applied'}>{statusText(listed.status)}</span
+						class:error={row.status.state === 'Failed'}
+						class:ok={row.status.state === 'Applied'}>{statusText(row.status)}</span
 					>
-				</div>
-			{:else}
-				<p class="muted">Profiles can be applied to printers in the Configure list.</p>
-				<button onclick={addToList}>Add {ip} to the list</button>
+				{/if}
+			</div>
+			{#if !row || row.hidden}
+				<p class="muted small">
+					Applying here doesn’t add it to the Configure list; its progress shows here instead.
+					<button class="link" onclick={addToList}>Add it to the list</button>
+				</p>
 			{/if}
 			{#if v.setupError}<p class="error">{v.setupError}</p>{/if}
 		</section>
@@ -810,10 +835,18 @@
 		padding: 2px 10px;
 		font-size: 12px;
 	}
-	.top form,
 	.raw {
 		display: flex;
 		gap: 6px;
+	}
+	.found {
+		margin: -4px 0 12px;
+	}
+	button.link {
+		border: none;
+		background: none;
+		padding: 0;
+		color: var(--accent);
 	}
 	.bar h2 {
 		margin: 0;

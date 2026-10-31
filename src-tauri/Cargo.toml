@@ -1,6 +1,6 @@
 [package]
 name = "zebra_configure"
-version = "0.3.1"
+version = "0.4.0"
 description = "Configures Zebra printers over the network"
 authors = ["jctaylorjr"]
 edition = "2024"
@@ -26,12 +26,21 @@ anyhow = "1.0.104"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+# drives Edge over the DevTools protocol, to search ServiceNow signed in as the person
+tokio-tungstenite = "0.30.0"
+futures-util = "0.3.34"
 
-# looks past Windows' name cache when looking for a printer by a name it has just taken
+# looks past Windows' name cache when looking for a printer by a name it has just taken, and keeps
+# the browser's windows out of sight and ends it with the app
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
     "Win32_NetworkManagement_Dns",
+    "Win32_Security",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 

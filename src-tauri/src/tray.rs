@@ -10,7 +10,7 @@ use tauri_plugin_notification::NotificationExt;
 
 const TRAY: &str = "main";
 
-// how the printers on the Configure page are doing
+// how the printers given a profile are doing, from the Configure page or their Printer page
 #[derive(Debug, Default, PartialEq)]
 struct Work {
     busy: usize, // applying, or waiting to retry an offline printer

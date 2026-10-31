@@ -22,6 +22,7 @@ export type PrinterView = {
 	calNote: string;
 	calError: string;
 	setupError: string;
+	flash: boolean; // flash it from its model's Zebra folder when applying a profile; off at first
 	editing: string | null; // the setting being changed: print width, darkness or speed
 	editValue: string;
 	editBusy: boolean;
@@ -65,6 +66,7 @@ export function viewFor(ip: string): PrinterView {
 		calNote: '',
 		calError: '',
 		setupError: '',
+		flash: false,
 		editing: null,
 		editValue: '',
 		editBusy: false,

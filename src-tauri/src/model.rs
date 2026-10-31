@@ -27,6 +27,8 @@ pub struct Printer {
     pub hostname: Option<String>, // as it last reported it
     #[serde(default)]
     pub ip_addr: Option<String>, // the IP it last answered at, to look for it there if it moves
+    #[serde(default)]
+    pub hidden: bool, // given a profile from its Printer page, and not added to the Configure list
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

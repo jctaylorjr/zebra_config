@@ -64,9 +64,10 @@
 </script>
 
 <p class="muted">
-	A folder laid out like a USB mirror stick (appl, files, commands). Each printer gets the first
-	folder whose models match it, so firmware only goes to the models it's meant for. Changes save
-	straight away.
+	A folder laid out like a USB mirror stick (appl, files, commands). With Flash ticked when a profile
+	is applied, the printer is flashed from it as if you had plugged that USB stick into it. Each
+	printer gets the first folder whose models match it, so firmware only goes to the models it's
+	meant for. Changes save straight away.
 </p>
 {#if error}<p class="error">{error}</p>{/if}
 
@@ -125,7 +126,7 @@
 		</section>
 
 		<section class="preview">
-			<h2>What it sends</h2>
+			<h2>What flashing sends</h2>
 			{#if !selected.path}
 				<p class="muted">Choose a folder to see what's in it.</p>
 			{:else if selected.summary?.error}

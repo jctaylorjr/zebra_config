@@ -1046,6 +1046,7 @@ mod tests {
             status: Status::Pending,
             hostname: Some("ZD611-DGN260506510".into()),
             ip_addr: Some("10.15.18.21".into()),
+            hidden: false,
         }
     }
 

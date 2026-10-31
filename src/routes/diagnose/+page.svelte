@@ -5,6 +5,7 @@
 	import { confirm } from '@tauri-apps/plugin-dialog';
 	import { openUrl } from '@tauri-apps/plugin-opener';
 	import { onMount, tick, untrack } from 'svelte';
+	import OpenPrinter from '$lib/OpenPrinter.svelte';
 	import RecentPrinters from '$lib/RecentPrinters.svelte';
 	import { copy } from '$lib/clipboard';
 	import {
@@ -87,6 +88,9 @@
 		if (target.trim()) goto(diagnoseHref(target.trim()));
 	}
 
+	// how a control number typed in the box led to the printer opened
+	let found = $state<{ address: string; note: string } | null>(null);
+
 	function setGroup(feeds: boolean, on: boolean) {
 		for (const c of diagnosePage.checks.filter((c) => c.feeds === feeds)) {
 			if (on) picked.add(c.id);
@@ -154,9 +158,11 @@
 
 	let name = $derived(d?.identity?.hostname ?? ip);
 	let address = $derived(d?.identity?.ip_addr ?? '');
+	// printers given a profile from their Printer page aren't in the Configure list
+	let listed = $derived(diagnosePage.printers.filter((p) => !p.hidden));
 	let recentOthers = $derived(
 		recent.list.filter(
-			(r) => !diagnosePage.printers.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
+			(r) => !listed.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
 		)
 	);
 </script>
@@ -168,9 +174,9 @@
 	</h1>
 	<select value={ip} onchange={(e) => open(e.currentTarget.value)}>
 		<option value="" disabled>Choose a printer…</option>
-		{#if diagnosePage.printers.length}
+		{#if listed.length}
 			<optgroup label="Configure list">
-				{#each diagnosePage.printers as p}
+				{#each listed as p}
 					<option value={p.ip}>{p.ip}{p.model ? ` · ${p.model}` : ''}</option>
 				{/each}
 			</optgroup>
@@ -181,17 +187,16 @@
 			</optgroup>
 		{/if}
 	</select>
-	<form
-		onsubmit={(e) => {
-			e.preventDefault();
-			open(diagnosePage.typed);
+	<OpenPrinter
+		bind:typed={diagnosePage.typed}
+		onopen={(address, note) => {
+			found = { address, note };
+			open(address);
 		}}
-	>
-		<input bind:value={diagnosePage.typed} placeholder="or another IP / hostname" />
-		<button type="submit" disabled={!diagnosePage.typed.trim()}>Open</button>
-	</form>
+	/>
 	{#if ip}<a class="button" href={printerHref(ip)}>Printer page</a>{/if}
 </div>
+{#if ip && found?.address === ip && found.note}<p class="ok found">{found.note}</p>{/if}
 
 {#if !ip}
 	<p class="muted">Choose a printer to diagnose, or open one from its Printer page.</p>
@@ -342,9 +347,8 @@
 		color: var(--muted);
 		margin-left: 8px;
 	}
-	.top form {
-		display: flex;
-		gap: 6px;
+	.found {
+		margin: -4px 0 12px;
 	}
 	a.button {
 		border: 1px solid var(--border);

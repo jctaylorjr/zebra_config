@@ -14,6 +14,7 @@ export type Printer = {
 	status: Status;
 	hostname: string | null; // as it last reported it
 	ip_addr: string | null; // the IP it last answered at
+	hidden: boolean; // given a profile from its Printer page, and not in the Configure list
 };
 
 export type Network = {
@@ -67,6 +68,9 @@ export const fits = (models: string[], model: string | null) =>
 export const folderFor = (folders: FolderView[], model: string | null) =>
 	folders.find((f) => f.path && f.models.length > 0 && fits(f.models, model));
 
+// a Zebra folder by the models it's for, e.g. "ZD611/ZD621 folder", as every one is called Zebra
+export const folderLabel = (f: FolderView) => `${f.models.join('/')} folder`;
+
 export const statusText = (s: Status) => {
 	switch (s.state) {
 		case 'Offline':
@@ -98,6 +102,14 @@ export type Details = {
 export type PrinterSetting = { key: string; value: string; choices: string | null };
 
 export const printerHref = (ip: string) => `/printer?ip=${encodeURIComponent(ip)}`;
+
+// a control number, like 722858, or a name made of one, like CSC722858 or CSC-722858, which may
+// need looking up in ServiceNow; anything else is an address as it is
+export const needsLookup = (typed: string) => /^(csc-?)?\d{3,12}$/i.test(typed.trim());
+
+// what flashing from a Zebra folder does, for the checkboxes that turn it on
+export const flashHint =
+	'Flashes the printer from the Zebra folder for its model, as if you had plugged that USB stick into it: its firmware if the printer has another version, then the folder’s files and commands. The printer restarts, maybe more than once.';
 
 // a printer that came back at another address after a restart, e.g. renamed by new firmware
 export type Moved = { from: string; printer: Printer };

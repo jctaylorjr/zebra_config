@@ -3,11 +3,14 @@
 	import { listen } from '@tauri-apps/api/event';
 	import { onMount } from 'svelte';
 	import { follow, picks, selected } from '$lib/configure.svelte';
+	import { findPrinter, finding } from '$lib/find.svelte';
 	import { onShortcut } from '$lib/shortcuts';
 	import { dragSelect } from '$lib/selection';
 	import {
 		fits,
+		flashHint,
 		folderFor,
+		folderLabel,
 		printerHref,
 		statusText,
 		type FolderView,
@@ -21,15 +24,20 @@
 	let folders = $state<FolderView[]>([]);
 	let ip = $state('');
 	let addressBox = $state<HTMLInputElement>();
-	let adding = $state(false);
+	let adding = $state<string | null>(null); // what's being added, as typed
 	let error = $state('');
+	let note = $state(''); // how a control number led to the printer just added
 
 	let bulkProfile = $state('');
 	let bulkFolder = $state(true);
 
+	// printers given a profile from their Printer page aren't in this list
+	const listed = async () =>
+		(await invoke<Printer[]>('list_printers')).filter((p) => !p.hidden);
+
 	onMount(() => {
 		(async () => {
-			printers = await invoke<Printer[]>('list_printers');
+			printers = await listed();
 			profiles = (await invoke<{ profiles: Profile[] }>('list_profiles')).profiles;
 			folders = await invoke<FolderView[]>('list_folders');
 		})();
@@ -42,7 +50,7 @@
 			follow(from, printer.ip);
 		});
 		const offs = [
-			onShortcut('refresh', async () => (printers = await invoke<Printer[]>('list_printers'))),
+			onShortcut('refresh', async () => (printers = await listed())),
 			onShortcut('find', () => addressBox?.focus())
 		];
 		return () => {
@@ -58,13 +66,6 @@
 			(a): a is string => !!a && a.toLowerCase() !== p.ip.toLowerCase()
 		);
 
-	// every folder is called Zebra, so name it by what it's in, e.g. ZEBRA_USB
-	const folderName = (p: Printer) =>
-		folderFor(folders, p.model)
-			?.path?.split(/[\\/]/)
-			.filter(Boolean)
-			.at(-2);
-
 	let chosen = $derived(printers.filter((p) => selected.has(p.ip)));
 	// only profiles that fit every selected printer
 	let common = $derived(profiles.filter((pf) => chosen.every((p) => fits(pf.models, p.model))));
@@ -72,17 +73,21 @@
 		if (bulkProfile && !common.some((pf) => pf.id === bulkProfile)) bulkProfile = '';
 	});
 
+	// by its address, or by its control number, which is looked up in ServiceNow
 	async function add() {
-		error = '';
-		adding = true;
+		error = note = '';
+		const typed = ip.trim();
+		adding = typed;
 		try {
-			const p = await invoke<Printer>('add_printer', { ip });
+			const found = await findPrinter(typed);
+			const p = await invoke<Printer>('add_printer', { ip: found.address });
 			printers = [...printers, p];
-			ip = '';
+			note = found.note ?? '';
+			if (ip.trim() === typed) ip = '';
 		} catch (e) {
 			error = String(e);
 		}
-		adding = false;
+		adding = null;
 	}
 
 	async function start(p: Printer, profileId: string, useFolder: boolean) {
@@ -165,14 +170,25 @@
 		add();
 	}}
 >
-	<input bind:this={addressBox} bind:value={ip} placeholder="IP address or hostname" size="30" />
-	<button type="submit" class="primary" disabled={adding || !ip.trim()}>
-		{adding ? 'Connecting…' : 'Add printer'}
+	<input
+		bind:this={addressBox}
+		bind:value={ip}
+		placeholder="IP address, hostname or control number"
+		size="36"
+	/>
+	<button type="submit" class="primary" disabled={adding !== null || !ip.trim()}>
+		{adding === null ? 'Add printer' : adding in finding ? 'Looking up…' : 'Connecting…'}
 	</button>
+	{#if adding !== null && finding[adding]}<span class="muted">{finding[adding]}</span>{/if}
 </form>
+{#if note}<p class="ok">{note}</p>{/if}
 
 {#if printers.length === 0}
-	<p class="muted">Add a printer by its IP address or hostname to start.</p>
+	<p class="muted">
+		Add a printer by its IP address, hostname or control number to start. A control number, like
+		722858, is looked up in ServiceNow.
+	</p>
+	{#if error}<p class="error">{error}</p>{/if}
 {:else}
 	<div class="bulk">
 		{#if selected.size === 0}
@@ -183,7 +199,10 @@
 				<option value="" disabled>Profile…</option>
 				{#each common as pf}<option value={pf.id}>{pf.name}</option>{/each}
 			</select>
-			<label><input type="checkbox" bind:checked={bulkFolder} /> Zebra folder, where one matches</label>
+			<label title={flashHint}
+				><input type="checkbox" bind:checked={bulkFolder} /> Flash from the Zebra folder (as if by USB
+				stick), where one matches</label
+			>
 			<button class="primary" disabled={!bulkProfile} onclick={applySelected}
 				>Apply to selected</button
 			>
@@ -218,12 +237,12 @@
 					/>
 				</th>
 				<th>Printer</th><th>Model</th><th>Serial</th><th>Firmware</th><th>Profile</th>
-				<th>Zebra folder</th><th>Status</th><th></th>
+				<th title={flashHint}>Flash (as if by USB)</th><th>Status</th><th></th>
 			</tr>
 		</thead>
 		<tbody>
 			{#each printers as p, i (p.ip)}
-				{@const folder = folderName(p)}
+				{@const folder = folderFor(folders, p.model)}
 				{@const aka = alsoKnownAs(p)}
 				<tr
 					class:selected={selected.has(p.ip)}
@@ -260,16 +279,16 @@
 					</td>
 					<td>
 						{#if folder}
-							<label title="Firmware, files and commands from the Zebra folder for this model">
+							<label title={`${flashHint}\n\n${folder.path}`}>
 								<input
 									type="checkbox"
 									checked={picks.useFolder[p.ip] ?? true}
 									onchange={(e) => (picks.useFolder[p.ip] = e.currentTarget.checked)}
 								/>
-								{folder}
+								{folderLabel(folder)}
 							</label>
 						{:else}
-							<span class="muted">none for this model</span>
+							<span class="muted">no Zebra folder for this model</span>
 						{/if}
 					</td>
 					<td class:error={p.status.state === 'Failed'} class:ok={p.status.state === 'Applied'}>

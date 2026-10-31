@@ -1,10 +1,13 @@
 mod actions;
+mod browser;
 mod clone;
 mod diagnose;
+mod find;
 mod model;
 mod printer;
 mod profiles;
 mod recent;
+mod servicenow;
 mod settings;
 mod setup;
 mod tray;
@@ -16,7 +19,7 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Mutex, atomic::AtomicBool},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -32,14 +35,56 @@ pub struct AppState {
     settings: Mutex<settings::Settings>,
     recent: Mutex<Vec<recent::Recent>>,
     closed_while_busy: AtomicBool, // the window was closed while printers were being configured
+    servicenow: servicenow::ServiceNow, // for looking printers up by control number
+}
+
+// the profile of the browser the app reaches ServiceNow through, kept so its sign-in lasts
+fn browser_profile(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("browser-edge"))
+}
+
+// where what was typed in a printer search box leads: an address as it is, or the printer a
+// control number is, from ServiceNow. "find-status" events say what it's waiting on, like a
+// sign-in, tagged with what was typed
+#[tauri::command]
+async fn find_printer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<find::Found, String> {
+    let profile = browser_profile(&app)?;
+    let q = query.trim().to_string();
+    let report = |text: &str| {
+        let _ = app.emit("find-status", (&q, text));
+    };
+    find::find(&state.servicenow, &profile, &q, &report).await
+}
+
+// an address for what was typed: a control number is looked up, as the page may not have
+async fn address(app: &AppHandle, state: &AppState, typed: &str) -> Result<String, String> {
+    let typed = typed.trim();
+    if find::control_number(typed).is_none() {
+        return Ok(typed.to_string());
+    }
+    let profile = browser_profile(app)?;
+    let found = find::find(&state.servicenow, &profile, typed, &|_| {}).await?;
+    Ok(found.address)
 }
 
 #[tauri::command]
-async fn add_printer(state: State<'_, AppState>, ip: String) -> Result<Printer, String> {
-    // only ever talk to the IP or hostname that was entered
-    let ip = ip.trim().to_string();
+async fn add_printer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ip: String,
+) -> Result<Printer, String> {
+    // only ever talk to the IP or hostname that was entered, or that its control number led to
+    let ip = address(&app, &state, &ip).await?;
     if ip.is_empty() {
-        return Err("enter an IP address or hostname".into());
+        return Err("enter an IP address, hostname or control number".into());
     }
     let id = printer::identify(&ip).await.map_err(|e| e.to_string())?;
     let p = Printer {
@@ -51,13 +96,19 @@ async fn add_printer(state: State<'_, AppState>, ip: String) -> Result<Printer, 
         status: Status::Pending,
         hostname: id.hostname,
         ip_addr: id.ip_addr,
+        hidden: false,
     };
     let mut printers = state.printers.lock().unwrap();
     // the same printer can be entered by hostname or by IP, so compare serials too
     if let Some(dup) = printers
-        .values()
+        .values_mut()
         .find(|x| x.ip.eq_ignore_ascii_case(&ip) || (p.serial.is_some() && x.serial == p.serial))
     {
+        // one given a profile from its Printer page joins the list, as it is
+        if dup.hidden {
+            dup.hidden = false;
+            return Ok(dup.clone());
+        }
         return Err(format!("{ip} is already in the list as {}", dup.ip));
     }
     printers.insert(ip, p.clone());
@@ -227,14 +278,17 @@ fn save_folders(
     Ok(folder_views(&settings.folders))
 }
 
+// applies a profile to the printer at `ip`. one that isn't in the Configure list, given a
+// profile from its Printer page, is followed without being added there. returns the address
+// it's followed under
 #[tauri::command]
-fn apply_profile(
+async fn apply_profile(
     app: AppHandle,
     state: State<'_, AppState>,
     ip: String,
     profile_id: String,
     use_folder: bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let profile = state
         .profiles
         .lock()
@@ -243,7 +297,19 @@ fn apply_profile(
         .find(|p| p.id == profile_id)
         .cloned()
         .ok_or("no such profile")?;
-    start(&app, &state, &ip, profile, Some(profile_id), use_folder)
+    let ip = listed(&state, ip.trim(), false).await?;
+    if let Err(e) = start(&app, &state, &ip, profile, Some(profile_id), use_folder) {
+        // one followed out of sight just now isn't kept if nothing was applied to it
+        let mut printers = state.printers.lock().unwrap();
+        if printers
+            .get(&ip)
+            .is_some_and(|p| p.hidden && p.status == Status::Pending)
+        {
+            printers.remove(&ip);
+        }
+        return Err(e);
+    }
+    Ok(ip)
 }
 
 // applies `profile` to the listed printer `ip`, with its model's Zebra folder if asked
@@ -291,8 +357,13 @@ fn start(
 
 // what the Clone page shows about the printer to copy from
 #[tauri::command]
-async fn clone_source(ip: String) -> Result<clone::Source, String> {
-    clone::read(ip.trim()).await.map_err(|e| e.to_string())
+async fn clone_source(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ip: String,
+) -> Result<clone::Source, String> {
+    let ip = address(&app, &state, &ip).await?;
+    clone::read(&ip).await.map_err(|e| e.to_string())
 }
 
 // makes the printer at `to` like the one at `from`, e.g. a loaner standing in for it: lists it
@@ -307,11 +378,18 @@ async fn clone_printer(
     pick: Vec<String>,
     use_folder: bool,
 ) -> Result<String, String> {
-    let source = clone::read(from.trim())
+    let from = address(&app, &state, &from).await?;
+    let source = clone::read(&from)
         .await
-        .map_err(|e| format!("can't read {}: {e}", from.trim()))?;
+        .map_err(|e| format!("can't read {from}: {e}"))?;
     let profile = clone::profile(&source, &pick)?;
-    let to = listed(&state, to.trim()).await?;
+    let to = address(&app, &state, &to).await?;
+    if to.is_empty() {
+        return Err(
+            "enter the IP address, hostname or control number of the printer to copy to".into(),
+        );
+    }
+    let to = listed(&state, &to, true).await?;
     let serial = state
         .printers
         .lock()
@@ -325,25 +403,29 @@ async fn clone_printer(
     Ok(to)
 }
 
-// where Configure lists the printer at `address`, adding it if it isn't listed yet, under
-// another address or not
-async fn listed(state: &AppState, address: &str) -> Result<String, String> {
+// where the app follows the printer at `address`, under another address or not, adding it if
+// it isn't there yet: to the Configure list when `show` is set, and otherwise out of sight
+async fn listed(state: &AppState, address: &str, show: bool) -> Result<String, String> {
     if address.is_empty() {
-        return Err("enter the IP address or hostname of the printer to copy to".into());
+        return Err("enter the printer's IP address, hostname or control number".into());
     }
-    let same = |p: &&Printer| p.ip.eq_ignore_ascii_case(address);
-    if let Some(p) = state.printers.lock().unwrap().values().find(same) {
-        return Ok(p.ip.clone());
+    let take = |p: &mut Printer| {
+        p.hidden &= !show;
+        p.ip.clone()
+    };
+    let same = |p: &&mut Printer| p.ip.eq_ignore_ascii_case(address);
+    if let Some(p) = state.printers.lock().unwrap().values_mut().find(same) {
+        return Ok(take(p));
     }
     let id = printer::identify(address)
         .await
         .map_err(|e| format!("can't reach {address}: {e}"))?;
     let mut printers = state.printers.lock().unwrap();
     if let Some(p) = printers
-        .values()
+        .values_mut()
         .find(|p| id.serial.is_some() && p.serial == id.serial)
     {
-        return Ok(p.ip.clone());
+        return Ok(take(p));
     }
     printers.insert(
         address.to_string(),
@@ -356,6 +438,7 @@ async fn listed(state: &AppState, address: &str) -> Result<String, String> {
             status: Status::Pending,
             hostname: id.hostname,
             ip_addr: id.ip_addr,
+            hidden: !show,
         },
     );
     Ok(address.to_string())
@@ -585,6 +668,7 @@ pub fn run() {
         })
         .on_window_event(tray::on_window_event)
         .invoke_handler(tauri::generate_handler![
+            find_printer,
             add_printer,
             list_printers,
             list_profiles,

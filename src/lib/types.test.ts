@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 import { describe, expect, test } from 'bun:test';
-import { recentLabel, type Recent } from './types';
+import { needsLookup, recentLabel, type Recent } from './types';
 
 const printer = (r: Partial<Recent>): Recent => ({
 	address: '192.0.2.5',
@@ -25,5 +25,17 @@ describe('recentLabel', () => {
 
 	test('falls back to the address', () => {
 		expect(recentLabel(printer({}))).toBe('192.0.2.5');
+	});
+});
+
+describe('needsLookup', () => {
+	test('takes control numbers and names made of them, whatever their case', () => {
+		for (const typed of ['722858', ' 722858 ', 'CSC722858', 'csc-722858', 'Csc722858'])
+			expect(needsLookup(typed)).toBe(true);
+	});
+
+	test('leaves addresses and other names alone', () => {
+		for (const typed of ['10.1.2.3', 'CSCDGN260506471', 'ZD611-DGN260506510', 'csc', '12', ''])
+			expect(needsLookup(typed)).toBe(false);
 	});
 });

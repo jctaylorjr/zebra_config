@@ -3,8 +3,10 @@
 	import { listen } from '@tauri-apps/api/event';
 	import { onMount } from 'svelte';
 	import { clonePage as c } from '$lib/clone.svelte';
+	import { findPrinter, finding } from '$lib/find.svelte';
 	import { recent } from '$lib/recent.svelte';
 	import {
+		flashHint,
 		printerHref,
 		recentLabel,
 		statusText,
@@ -13,10 +15,14 @@
 		type Printer
 	} from '$lib/types';
 
-	let printers = $state<Printer[]>([]); // the Configure list, to pick from and to follow
+	let printers = $state<Printer[]>([]); // the app's printers, to pick from and to follow
 	let reading = $state(false);
 	let starting = $state(false);
 	let error = $state('');
+	// how a control number typed in either box led to its printer
+	let fromNote = $state('');
+	let toNote = $state('');
+	let looking = $state<string | null>(null); // a control number being looked up, as typed
 
 	onMount(() => {
 		(async () => (printers = await invoke<Printer[]>('list_printers')))();
@@ -37,18 +43,33 @@
 	// the printer being copied to, as Configure lists it
 	let target = $derived(printers.find((p) => p.ip === c.target));
 	let busy = $derived(target?.status.state === 'Applying' || target?.status.state === 'Offline');
+	// the Configure list, to pick from; printers given a profile from their Printer page aren't in it
+	let listed = $derived(printers.filter((p) => !p.hidden));
 	let recentOthers = $derived(
 		recent.list.filter(
-			(r) => !printers.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
+			(r) => !listed.some((p) => p.ip.toLowerCase() === r.address.toLowerCase())
 		)
 	);
 	let copyingName = $derived(c.pick.includes('hostname') ? c.source?.hostname : null);
 
+	// the address for what's in a box, a control number looked up and put in its place
+	async function lookUp(typed: string) {
+		looking = typed.trim();
+		try {
+			return await findPrinter(typed);
+		} finally {
+			looking = null;
+		}
+	}
+
 	async function read() {
-		error = '';
+		error = fromNote = '';
 		reading = true;
 		try {
-			c.source = await invoke<CloneSource>('clone_source', { ip: c.from });
+			const found = await lookUp(c.from);
+			c.from = found.address;
+			fromNote = found.note ?? '';
+			c.source = await invoke<CloneSource>('clone_source', { ip: found.address });
 			c.pick = c.source.settings.map((s) => s.id);
 		} catch (e) {
 			c.source = null;
@@ -58,17 +79,20 @@
 	}
 
 	async function clone() {
-		error = '';
+		error = toNote = '';
 		starting = true;
 		try {
-			const listed = await invoke<string>('clone_printer', {
+			const found = await lookUp(c.to);
+			c.to = found.address;
+			toNote = found.note ?? '';
+			const followed = await invoke<string>('clone_printer', {
 				from: c.from,
-				to: c.to,
+				to: found.address,
 				pick: c.pick,
 				useFolder: c.useFolder
 			});
 			printers = await invoke<Printer[]>('list_printers');
-			c.target = listed;
+			c.target = followed;
 		} catch (e) {
 			error = String(e);
 		}
@@ -96,11 +120,19 @@
 			read();
 		}}
 	>
-		<input list="clone-printers" bind:value={c.from} placeholder="IP or hostname" />
+		<input
+			list="clone-printers"
+			bind:value={c.from}
+			placeholder="IP, hostname or control number"
+		/>
 		<button type="submit" disabled={!c.from.trim() || reading}>
-			{reading ? 'Reading…' : 'Read settings'}
+			{reading ? (looking !== null ? 'Looking up…' : 'Reading…') : 'Read settings'}
 		</button>
+		{#if reading && looking !== null && finding[looking]}
+			<span class="muted">{finding[looking]}</span>
+		{/if}
 	</form>
+	{#if fromNote}<p class="ok small">{fromNote}</p>{/if}
 	{#if c.source}
 		<p class="who">
 			<strong>{c.source.hostname ?? c.from}</strong>
@@ -151,9 +183,17 @@
 <section class="card">
 	<h2>Copy to</h2>
 	<div class="row">
-		<input list="clone-printers" bind:value={c.to} placeholder="IP or hostname of the loaner" />
-		<label><input type="checkbox" bind:checked={c.useFolder} /> Its model's Zebra folder too</label>
+		<input
+			list="clone-printers"
+			bind:value={c.to}
+			placeholder="IP, hostname or control number of the loaner"
+		/>
+		<label title={flashHint}
+			><input type="checkbox" bind:checked={c.useFolder} /> Flash it from its model's Zebra folder too,
+			as if you had used that USB stick</label
+		>
 	</div>
+	{#if toNote}<p class="ok small">{toNote}</p>{/if}
 	{#if copyingName}
 		<p class="warn">
 			The printer copied from is still called {copyingName}, and two printers can't share a name:
@@ -167,8 +207,11 @@
 			disabled={!c.source || !c.to.trim() || c.pick.length === 0 || starting || busy}
 			onclick={clone}
 		>
-			{starting ? 'Starting…' : 'Clone'}
+			{starting ? (looking !== null ? 'Looking up…' : 'Starting…') : 'Clone'}
 		</button>
+		{#if starting && looking !== null && finding[looking]}
+			<span class="muted">{finding[looking]}</span>
+		{/if}
 		{#if target}
 			<span>
 				<a href={printerHref(target.ip)}>{target.hostname ?? target.ip}</a>
@@ -188,7 +231,7 @@
 </section>
 
 <datalist id="clone-printers">
-	{#each printers as p}<option value={p.ip}>{p.hostname ?? ''} {p.model ?? ''}</option>{/each}
+	{#each listed as p}<option value={p.ip}>{p.hostname ?? ''} {p.model ?? ''}</option>{/each}
 	{#each recentOthers as r}<option value={r.address}>{recentLabel(r)}</option>{/each}
 </datalist>
 

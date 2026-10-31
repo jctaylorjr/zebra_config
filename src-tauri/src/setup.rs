@@ -56,9 +56,15 @@ pub fn settings(p: &Profile, target: Option<&Target>) -> Result<Vec<Setting>, St
     };
 
     if let Some(name) = &p.hostname {
+        // in capitals, as printers' names are, whichever way the profile has it: CSC and the
+        // serial, not csc. names are the same to DNS either way
         let name = match target {
-            Some(t) => name.replace("{serial}", &t.serial),
-            None => name.clone(),
+            Some(t) => name.replace("{serial}", &t.serial).to_uppercase(),
+            None => name
+                .split("{serial}")
+                .map(str::to_uppercase)
+                .collect::<Vec<_>>()
+                .join("{serial}"),
         };
         // before Link-OS 7.6 the friendly name is the hostname. from 7.6 the hostname is
         // ip.hostname, and the friendly name only names the printer elsewhere, e.g. Bluetooth
@@ -359,6 +365,24 @@ mod tests {
             .collect();
         assert!(
             keys.contains(&"ip.hostname".into()) && keys.contains(&"device.friendly_name".into())
+        );
+    }
+
+    #[test]
+    fn hostnames_go_in_capitals() {
+        let mut p = profile(None);
+        p.hostname = Some("csc-{serial}".into());
+        let mut t = target(203, 448);
+        t.serial = "abc123".into();
+        assert_eq!(
+            lines(&p, &t)[0],
+            r#"! U1 setvar "device.friendly_name" "CSC-ABC123""#
+        );
+        assert_eq!(settings(&p, None).unwrap()[0].value, "CSC-{serial}");
+        p.hostname = Some("csc722858".into());
+        assert_eq!(
+            lines(&p, &t)[0],
+            r#"! U1 setvar "device.friendly_name" "CSC722858""#
         );
     }
 
