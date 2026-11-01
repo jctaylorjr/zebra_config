@@ -300,19 +300,28 @@ mod tests {
     }
 
     // ZEBRA_FIND is what's typed, like a control number; asks ServiceNow as the person signed in
-    // to the app's browser
+    // to the app's browser. ZEBRA_FIND_TIMES searches that many times with the same browser, to
+    // compare the first search, which starts Edge and signs in, with the ones after
     #[tokio::test]
     #[ignore]
     async fn find_printer() {
         let q = std::env::var("ZEBRA_FIND").expect("set ZEBRA_FIND");
+        let times: usize = std::env::var("ZEBRA_FIND_TIMES")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(1);
         let profile = Path::new(&std::env::var("APPDATA").unwrap())
             .join("com.jt1280.zebra-configure")
             .join("browser-edge");
-        let began = std::time::Instant::now();
-        let report = |s: &str| println!("... {:.1}s {s}", began.elapsed().as_secs_f32());
-        println!(
-            "{:?}",
-            find(&ServiceNow::default(), &profile, &q, &report).await
-        );
+        let sn = ServiceNow::default();
+        for search in 1..=times {
+            let began = std::time::Instant::now();
+            let report = |s: &str| println!("... {:.1}s {s}", began.elapsed().as_secs_f32());
+            let found = find(&sn, &profile, &q, &report).await;
+            println!(
+                "search {search}: {:.2}s {found:?}",
+                began.elapsed().as_secs_f32()
+            );
+        }
     }
 }

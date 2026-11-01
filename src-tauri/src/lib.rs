@@ -664,6 +664,16 @@ pub fn run() {
             *state.settings.lock().unwrap() = settings::load(app.handle());
             *state.recent.lock().unwrap() = recent::load(app.handle());
             tray::create(app.handle())?;
+            // Edge starts out of sight and signs in to ServiceNow while the app opens, so the
+            // first search by control number is as quick as the rest; it stays, with its one
+            // tab, until the app closes. one that can't sign in now tries again at a search
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(profile) = browser_profile(&handle) {
+                    let state = handle.state::<AppState>();
+                    let _ = state.servicenow.warm_up(&profile).await;
+                }
+            });
             Ok(())
         })
         .on_window_event(tray::on_window_event)

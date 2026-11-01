@@ -103,6 +103,13 @@ impl ServiceNow {
         Ok(records(&self.get(profile, &path, report).await?))
     }
 
+    // signs in ahead of the first search, as the app opens, so no search waits the several
+    // seconds Edge takes to start and sign in. a sign-in that needs someone comes up then too,
+    // rather than in the middle of a search
+    pub async fn warm_up(&self, profile: &Path) -> Result<()> {
+        self.page(profile, &|_| {}).await.map(|_| ())
+    }
+
     // a Table API read, like "/api/now/table/alm_hardware?sysparm_query=..."; returns its result.
     // `profile` is the browser's profile folder, and `report` hears what it's waiting for
     pub async fn get(
@@ -111,37 +118,41 @@ impl ServiceNow {
         path: &str,
         report: &(dyn Fn(&str) + Sync),
     ) -> Result<Value> {
-        for attempt in 0..2 {
+        for attempt in 0..3 {
             let page = self.page(profile, report).await?;
+            // status 0: the page has no token, as one the tab has only just gone on to doesn't
+            // yet; asking without one would be refused as if signed out
             let js = format!(
                 r#"(async () => {{
+                    const token = {token};
+                    if (!token) return {{ status: 0, text: '' }};
                     const r = await fetch({path}, {{
                         credentials: 'same-origin',
-                        headers: {{ 'Accept': 'application/json', 'X-UserToken': {token} }}
+                        headers: {{ 'Accept': 'application/json', 'X-UserToken': token }}
                     }});
                     return {{ status: r.status, text: await r.text() }};
                 }})()"#,
                 path = js_str(path),
                 token = token_js(),
             );
-            let r: Fetched = match page.eval(&js).await {
-                Ok(r) => r,
+            let r = match page.eval::<Fetched>(&js).await {
+                Ok(r) if r.status != 0 => r,
                 // the tab went on to another page as it was asked, as the end of a sign-in can
-                // send it, or closed; asked again in it, or in a new one
-                Err(_) if attempt == 0 => {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    if !page.alive() {
+                // send it, or closed: asked again once it settles, or in a new tab
+                Ok(_) | Err(_) if attempt < 2 => {
+                    if !settle(&page).await {
                         self.forget(&page).await;
                     }
                     continue;
                 }
+                Ok(_) => bail!("ServiceNow's page never had the session's token"),
                 Err(e) => return Err(e),
             };
             let json = serde_json::from_str::<Value>(&r.text).ok();
             match (r.status, json) {
                 (200..=299, Some(v)) => return Ok(v.get("result").cloned().unwrap_or(v)),
-                // signed out: a sign-in page instead of JSON, or 401. signs in again and asks once more
-                (200..=299, None) | (401, _) if attempt == 0 => {
+                // signed out: a sign-in page instead of JSON, or 401. signs in again and asks again
+                (200..=299, None) | (401, _) if attempt < 2 => {
                     self.forget(&page).await;
                     continue;
                 }
@@ -190,31 +201,50 @@ impl ServiceNow {
     }
 }
 
-// waits until the tab is signed in to the instance. single sign-on usually manages by itself,
-// passing through Microsoft's sign-in page on the way, so the browser is only shown when the tab
-// stays on a sign-in page for a few seconds or 20 seconds pass; then it waits up to 15 minutes
-// for someone to sign in there
-async fn signed_in(page: &Page, report: &(dyn Fn(&str) + Sync)) -> Result<()> {
+// the instance's pages a sign-in passes through on the way to the one asked for: its root, its
+// SAML pages, and the classic pages that send on to the Next Experience shell. each can have
+// the session's token for a moment before it moves on
+const PASSING_JS: &str =
+    r"/^\/(?:(?:saml_redirector|nav_to|navpage|auth_redirect|external_login)[^/]*)?$/";
+
+// whether the tab has settled on a signed-in page of the instance: loaded, with the session's
+// token, and still there a second later. a sign-in ends going through several pages in a couple
+// of seconds, so one of those only counts once it has stayed for five, as where it ended up
+async fn settled(page: &Page) -> bool {
     let host = INSTANCE.split("://").nth(1).unwrap_or(INSTANCE);
-    let ready_js = format!(
-        "location.host === {} && !location.pathname.startsWith('/login') && !!{} && location.href",
+    let js = format!(
+        "(document.readyState === 'complete' && location.host === {} && !location.pathname.startsWith('/login') && !!{}) ? [location.href, {PASSING_JS}.test(location.pathname)] : null",
         js_str(host),
         token_js()
     );
-    // the same page twice, half a second apart, as the end of a sign-in passes through a page
-    // with a token that goes straight on to the one asked for
-    let ready = || async {
-        let first = page.eval::<Value>(&ready_js).await.ok();
-        let Some(Value::String(href)) = first else {
-            return false;
-        };
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        page.eval::<Value>(&ready_js).await.ok() == Some(Value::String(href))
+    let Ok(Some((href, passing))) = page.eval::<Option<(String, bool)>>(&js).await else {
+        return false;
     };
+    tokio::time::sleep(Duration::from_secs(if passing { 5 } else { 1 })).await;
+    matches!(page.eval::<Option<(String, bool)>>(&js).await, Ok(Some((now, _))) if now == href)
+}
+
+// waits up to 30 seconds for a tab that went on to another page to settle again
+async fn settle(page: &Page) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline && page.alive() {
+        if settled(page).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+// waits until the tab is signed in to the instance. single sign-on usually manages by itself,
+// passing through a sign-in page on the way, so the browser is only shown when the tab stays on
+// a sign-in page for a few seconds or 30 seconds pass; then it waits up to 15 minutes for
+// someone to sign in there
+async fn signed_in(page: &Page, report: &(dyn Fn(&str) + Sync)) -> Result<()> {
     let start = Instant::now();
     let mut on_sign_in: Option<Instant> = None;
     loop {
-        if ready().await {
+        if settled(page).await {
             return Ok(());
         }
         if !page.alive() {
@@ -225,7 +255,7 @@ async fn signed_in(page: &Page, report: &(dyn Fn(&str) + Sync)) -> Result<()> {
         } else if on_sign_in.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(5) {
             break;
         }
-        if start.elapsed() > Duration::from_secs(20) {
+        if start.elapsed() > Duration::from_secs(30) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -242,7 +272,7 @@ async fn signed_in(page: &Page, report: &(dyn Fn(&str) + Sync)) -> Result<()> {
     page.browser.begin_sign_in(page).await;
     let deadline = Instant::now() + Duration::from_secs(900);
     while Instant::now() < deadline && page.alive() {
-        if ready().await {
+        if settled(page).await {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -396,6 +426,25 @@ mod tests {
         let sn = ServiceNow::default();
         let began = Instant::now();
         let report = |s: &str| println!("... {:.1}s {s}", began.elapsed().as_secs_f32());
+        // the tab sent through the pages the end of a sign-in goes through, and asked at once,
+        // as a slow sign-in can leave it; or its session ended, as it does when it runs out
+        let moving = std::env::var_os("ZEBRA_SN_MOVE").is_some();
+        let ending = std::env::var_os("ZEBRA_SN_EXPIRE").is_some();
+        if moving || ending {
+            let first = paths.lines().next().unwrap_or_default().trim();
+            sn.get(&profile, first, &report).await.unwrap();
+            let page = sn.page.lock().await.clone().unwrap();
+            let js = if ending {
+                "fetch('/logout.do', { credentials: 'same-origin', redirect: 'manual' }).then(() => null, () => null)".to_string()
+            } else {
+                let chain = format!(
+                    "{INSTANCE}/nav_to.do?uri=%2Ftask_list.do%3Fsysparm_query%3Dsys_id%253D-1"
+                );
+                format!("(location.href = {}, null)", js_str(&chain))
+            };
+            let _ = page.eval::<Value>(&js).await;
+            report(if ending { "session ended" } else { "sent on" });
+        }
         for path in paths.lines().map(str::trim).filter(|p| !p.is_empty()) {
             report(&format!("GET {path}"));
             match sn.get(&profile, path, &report).await {

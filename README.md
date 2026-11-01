@@ -70,11 +70,14 @@ with that serial, and says where ServiceNow has the printer. When ServiceNow has
 number, or can't be reached, it takes a printer that calls itself CSC722858 or CSC-722858. A name
 typed like CSC722858 that no printer answers to is looked up by its number the same way.
 
-The app asks ServiceNow as you, through Microsoft Edge. It starts Edge out of sight with a profile of
-its own (`browser-edge` in the app data folder), opens partnershealthcare.service-now.com there, and
-reads the printer records through ServiceNow's Table API with that session's token. Single sign-on
-usually signs it in by itself; when it can't, the Edge window comes up for you to sign in, and hides
-again once you have. Edge closes when the app does. The app only reads printer records
+The app asks ServiceNow as you, through Microsoft Edge. As the app opens, it starts Edge out of
+sight with a profile of its own (`browser-edge` in the app data folder) and signs in to
+partnershealthcare.service-now.com there, so no search waits for that: starting Edge and signing in
+takes about 8 seconds, and a search then reads the printer records through ServiceNow's Table API,
+with that session's token, in about a tenth of a second. Single sign-on usually signs it in by
+itself; when it can't, the Edge window comes up for you to sign in, and hides again once you have.
+When ServiceNow's session runs out, the next search signs in again by itself. Edge stays open,
+hidden, with its one tab, until the app closes. The app only reads printer records
 (`cmdb_ci_printer`); it never changes anything in ServiceNow.
 
 ## Installing
@@ -216,3 +219,8 @@ ZEBRA_FIND=722858 cargo test find_printer -- --ignored --nocapture
 ZEBRA_SN_GET='/api/now/table/cmdb_ci_printer?sysparm_query=name%3D722858&sysparm_limit=5' \
 cargo test ask_servicenow -- --ignored --nocapture
 ```
+
+`ZEBRA_FIND_TIMES=4` searches four times with the same browser, to compare the first search with
+the rest. With `ZEBRA_SN_EXPIRE=1`, `ask_servicenow` ends the session after signing in, as a
+timeout would, before reading; with `ZEBRA_SN_MOVE=1` it sends the tab through the pages a sign-in
+ends with, and reads while it's moving.
