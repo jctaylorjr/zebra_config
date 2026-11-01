@@ -1,9 +1,10 @@
 // what's typed in a printer search box: an IP address or hostname, used as it is, or a control
-// number, the number on a printer's asset label. ServiceNow names each printer's record by its
-// control number and has its serial. a new printer is named CSC and its serial, older ones CSC
-// and the control number, sometimes with a dash, and Link-OS 7.6 names one its model and serial
-// until it's given a name. so a control number is looked up in ServiceNow, and the printer is
-// the one that answers to one of those names and has that serial
+// number, the number on a printer's asset label. ServiceNow has each printer's record with its
+// serial, and its control number as its name or in its description (servicenow::Record). a new
+// printer is named CSC and its serial, older ones CSC and the control number, sometimes with a
+// dash, and Link-OS 7.6 names one its model and serial until it's given a name. so a control
+// number is looked up in ServiceNow, and the printer is the one that answers to one of those
+// names and has that serial
 use crate::{
     printer::{self, Identity},
     servicenow::{Record, ServiceNow},
@@ -45,7 +46,8 @@ fn names_for(n: &str) -> Vec<String> {
 }
 
 // the names the printer `r` may answer to: CSC and its serial, then its model and serial, as
-// Link-OS 7.6 names it, then the control number's
+// Link-OS 7.6 names it, then the control number's, then its serial alone, as a printer that was
+// never given a name sends it for one
 fn names_with_serial(r: &Record, n: &str) -> Vec<String> {
     let serial = r.serial.to_uppercase();
     let mut names = vec![format!("CSC{serial}")];
@@ -53,6 +55,7 @@ fn names_with_serial(r: &Record, n: &str) -> Vec<String> {
         names.push(format!("{code}-{serial}"));
     }
     names.extend(names_for(n));
+    names.push(serial);
     names
 }
 
@@ -119,8 +122,18 @@ async fn by_number(
             };
         }
     };
-    // ServiceNow matches names without regard to case and the like, so only its exact ones
-    let mut own: Vec<&Record> = records.iter().filter(|r| r.name == n).collect();
+    // the records whose description gives it as their control number first, as one named for
+    // its EID number is, then the ones named for it. ServiceNow also sends records that only
+    // mention the number, and matches names without regard to case and the like
+    let mut own: Vec<&Record> = records
+        .iter()
+        .filter(|r| r.says_control_number(n))
+        .collect();
+    own.extend(
+        records
+            .iter()
+            .filter(|r| !r.says_control_number(n) && r.named_for(n)),
+    );
     own.sort_by_key(|r| r.serial.is_empty());
     let place = own
         .iter()
@@ -273,14 +286,15 @@ mod tests {
                 "CSCDGN260506471",
                 "ZD611-DGN260506471",
                 "CSC722858",
-                "CSC-722858"
+                "CSC-722858",
+                "DGN260506471"
             ]
         );
         let unknown = Record {
             model: "Zebra Printer".into(),
             ..r.clone()
         };
-        assert_eq!(names_with_serial(&unknown, "722858").len(), 3);
+        assert_eq!(names_with_serial(&unknown, "722858").len(), 4);
         assert_eq!(model_code("Zebra ZQ630 Plus"), Some("ZQ630".into()));
     }
 
@@ -300,8 +314,9 @@ mod tests {
     }
 
     // ZEBRA_FIND is what's typed, like a control number; asks ServiceNow as the person signed in
-    // to the app's browser. ZEBRA_FIND_TIMES searches that many times with the same browser, to
-    // compare the first search, which starts Edge and signs in, with the ones after
+    // to the app's browser, or to the profile ZEBRA_SN_PROFILE names, as it must while the app is
+    // open. ZEBRA_FIND_TIMES searches that many times with the same browser, to compare the
+    // first search, which starts Edge and signs in, with the ones after
     #[tokio::test]
     #[ignore]
     async fn find_printer() {
@@ -310,9 +325,13 @@ mod tests {
             .ok()
             .and_then(|t| t.parse().ok())
             .unwrap_or(1);
-        let profile = Path::new(&std::env::var("APPDATA").unwrap())
-            .join("com.jt1280.zebra-configure")
-            .join("browser-edge");
+        let profile = std::env::var("ZEBRA_SN_PROFILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                Path::new(&std::env::var("APPDATA").unwrap())
+                    .join("com.jt1280.zebra-configure")
+                    .join("browser-edge")
+            });
         let sn = ServiceNow::default();
         for search in 1..=times {
             let began = std::time::Instant::now();

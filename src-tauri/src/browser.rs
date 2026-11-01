@@ -72,13 +72,14 @@ struct Windows {
 }
 
 impl Browser {
-    // connects to the browser an earlier run left with this profile, or else starts one
+    // connects to the browser already running with this profile, or else starts one. one that's
+    // running was started by another copy of the app, as each one's ends with it, and stays that
+    // copy's: taken over, it would end when this copy does, under the other one
     pub async fn launch(exe: &Path, profile: &Path) -> Result<Arc<Browser>> {
         let port_file = profile.join("DevToolsActivePort");
         if let Some(url) = read_port_file(&port_file)
             && let Ok(b) = connect(&url).await
         {
-            job::hold_pid(b.windows.pid.load(Ordering::SeqCst) as u32);
             return Ok(b);
         }
         // a browser closed just now can take a moment to let go of the profile, and a new one
@@ -663,9 +664,6 @@ mod job {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-    };
 
     struct Job(HANDLE);
     // SAFETY: a job handle can be used from any thread
@@ -698,28 +696,10 @@ mod job {
         .0
     }
 
-    fn assign(process: HANDLE) {
-        let job = shared();
+    pub fn hold_child(child: &std::process::Child) {
+        let (job, process) = (shared(), child.as_raw_handle() as HANDLE);
         if !job.is_null() && !process.is_null() {
             unsafe { AssignProcessToJobObject(job, process) };
-        }
-    }
-
-    pub fn hold_child(child: &std::process::Child) {
-        assign(child.as_raw_handle() as HANDLE);
-    }
-
-    // a browser an earlier run started, named by its process id
-    pub fn hold_pid(pid: u32) {
-        if pid == 0 {
-            return;
-        }
-        unsafe {
-            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-            if !process.is_null() {
-                assign(process);
-                CloseHandle(process);
-            }
         }
     }
 }
@@ -727,5 +707,4 @@ mod job {
 #[cfg(not(windows))]
 mod job {
     pub fn hold_child(_child: &std::process::Child) {}
-    pub fn hold_pid(_pid: u32) {}
 }
