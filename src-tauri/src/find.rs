@@ -1,10 +1,9 @@
 // what's typed in a printer search box: an IP address or hostname, used as it is, or a control
-// number, the number on a printer's asset label. ServiceNow has each printer's record with its
-// serial, and its control number as its name or in its description (servicenow::Record). a new
-// printer is named CSC and its serial, older ones CSC and the control number, sometimes with a
-// dash, and Link-OS 7.6 names one its model and serial until it's given a name. so a control
-// number is looked up in ServiceNow, and the printer is the one that answers to one of those
-// names and has that serial
+// number, the number on a printer's asset label. ServiceNow names each printer's record by its
+// control number and has its serial. a new printer is named CSC and its serial, older ones CSC
+// and the control number, sometimes with a dash, and Link-OS 7.6 names one its model and serial
+// until it's given a name. so a control number is looked up in ServiceNow, and the printer is
+// the one that answers to one of those names and has that serial
 use crate::{
     printer::{self, Identity},
     servicenow::{Record, ServiceNow},
@@ -98,6 +97,9 @@ pub async fn find(
     Ok(Found::plain(q))
 }
 
+// a control number is one printer: the one with the serial on the one record ServiceNow has
+// under that number. nothing else is taken for it, as a record that's wrong is put right in
+// ServiceNow
 async fn by_number(
     sn: &ServiceNow,
     profile: &Path,
@@ -105,116 +107,67 @@ async fn by_number(
     report: &(dyn Fn(&str) + Sync),
 ) -> Result<Found, String> {
     report(&format!("Looking up {n} in ServiceNow"));
-    let records = match sn.printers(profile, n, report).await {
-        Ok(r) => r,
-        Err(e) => {
-            // without ServiceNow, only a printer that calls itself one of the names
-            let names = names_for(n);
-            report(&format!("Looking for {}", or_list(&names)));
-            return match calls_itself(&names).await {
-                Some(name) => Ok(Found {
-                    note: Some(format!(
-                        "{n} is {name}, by its name alone, as ServiceNow couldn't be asked: {e:#}"
-                    )),
-                    address: name,
-                }),
-                None => Err(format!("couldn't ask ServiceNow about {n}: {e:#}")),
-            };
+    let records = sn
+        .printers(profile, n, report)
+        .await
+        .map_err(|e| format!("couldn't ask ServiceNow about {n}: {e:#}"))?;
+    // ServiceNow matches names without regard to case and the like, so only its exact ones
+    let own: Vec<&Record> = records.iter().filter(|r| r.name == n).collect();
+    let r = match own.as_slice() {
+        [] => return Err(format!("ServiceNow has no printer with control number {n}")),
+        [one] => *one,
+        many => {
+            let serials: Vec<String> = many
+                .iter()
+                .map(|r| match r.serial.as_str() {
+                    "" => "no serial".to_string(),
+                    s => s.to_string(),
+                })
+                .collect();
+            return Err(format!(
+                "ServiceNow has {} printers with control number {n} ({}), so it can't say which",
+                many.len(),
+                or_list(&serials)
+            ));
         }
     };
-    // the records whose description gives it as their control number first, as one named for
-    // its EID number is, then the ones named for it. ServiceNow also sends records that only
-    // mention the number, and matches names without regard to case and the like
-    let mut own: Vec<&Record> = records
-        .iter()
-        .filter(|r| r.says_control_number(n))
-        .collect();
-    own.extend(
-        records
-            .iter()
-            .filter(|r| !r.says_control_number(n) && r.named_for(n)),
-    );
-    own.sort_by_key(|r| r.serial.is_empty());
-    let place = own
-        .iter()
-        .map(|r| r.place())
-        .find(|p| !p.is_empty())
-        .map(|p| format!(" at {p}"))
-        .unwrap_or_default();
-    let (mut serials, mut tried) = (vec![], vec![]);
-    for r in own.iter().filter(|r| !r.serial.is_empty()) {
-        let names = names_with_serial(r, n);
-        report(&format!(
-            "Looking for {} with serial {}",
-            or_list(&names),
-            r.serial
-        ));
-        let has_serial = |id: &Identity| {
-            id.serial
-                .as_deref()
-                .is_some_and(|s| s.eq_ignore_ascii_case(&r.serial))
-        };
-        if let Some(i) = first(&names, has_serial).await {
-            return Ok(Found {
-                note: Some(format!("{n} is {}{place}", names[i])),
-                address: names[i].clone(),
-            });
-        }
-        serials.push(r.serial.clone());
-        for name in names {
-            if !tried.contains(&name) {
-                tried.push(name);
-            }
-        }
+    let place = match r.place() {
+        p if p.is_empty() => p,
+        p => format!(" at {p}"),
+    };
+    if r.serial.is_empty() {
+        return Err(format!("ServiceNow's record for {n}{place} has no serial"));
     }
-    if !serials.is_empty() {
-        return Err(format!(
-            "ServiceNow has {n}{place} as serial {}, but it didn't answer as {}",
-            or_list(&serials),
-            or_list(&tried)
-        ));
-    }
-    // ServiceNow doesn't have its serial: a printer that calls itself one of the names
-    let names = names_for(n);
-    report(&format!("Looking for {}", or_list(&names)));
-    match calls_itself(&names).await {
-        Some(name) => Ok(Found {
-            note: Some(format!("{n} is {name}{place}")),
-            address: name,
-        }),
-        None if own.is_empty() => Err(format!(
-            "ServiceNow has no printer with control number {n}, and none answered as {}",
-            or_list(&names)
-        )),
-        None => Err(format!(
-            "ServiceNow has no serial for {n}{place}, and no printer answered as {}",
-            or_list(&names)
-        )),
-    }
-}
-
-// the first of `names` a printer answers to with that name for itself
-async fn calls_itself(names: &[String]) -> Option<String> {
-    let i = first_each(names, |i, id| {
-        id.hostname
+    let names = names_with_serial(r, n);
+    report(&format!(
+        "Looking for {} with serial {}",
+        or_list(&names),
+        r.serial
+    ));
+    let has_serial = |id: &Identity| {
+        id.serial
             .as_deref()
-            .and_then(|h| h.split('.').next())
-            .is_some_and(|h| h.eq_ignore_ascii_case(&names[i]))
-    })
-    .await?;
-    Some(names[i].clone())
+            .is_some_and(|s| s.eq_ignore_ascii_case(&r.serial))
+    };
+    match first(&names, has_serial).await {
+        Some(i) => Ok(Found {
+            note: Some(format!("{n} is {}{place}", names[i])),
+            address: names[i].clone(),
+        }),
+        None => Err(format!(
+            "ServiceNow has {n}{place} as serial {}, but it didn't answer as {}",
+            r.serial,
+            or_list(&names)
+        )),
+    }
 }
 
-// the first of `names`, in their order, that a printer answers to that `fits`
+// the first of `names`, in their order, that a printer answers to that `fits`. the names are all
+// looked up at once, and the answer comes as soon as a name fits and every one before it is
+// known not to, so a printer under its usual name isn't kept waiting for names that don't exist,
+// which take seconds to rule out. Windows is made to look each name up again rather than trust a
+// "no such name" it remembers
 async fn first(names: &[String], fits: impl Fn(&Identity) -> bool) -> Option<usize> {
-    first_each(names, |_, id| fits(id)).await
-}
-
-// the same, with each name's own test. the names are all looked up at once, and the answer
-// comes as soon as a name fits and every one before it is known not to, so a printer under
-// its usual name isn't kept waiting for names that don't exist, which take seconds to rule out.
-// Windows is made to look each name up again rather than trust a "no such name" it remembers
-async fn first_each(names: &[String], fits: impl Fn(usize, &Identity) -> bool) -> Option<usize> {
     let mut pending: FuturesUnordered<_> = names
         .iter()
         .enumerate()
@@ -233,7 +186,7 @@ async fn first_each(names: &[String], fits: impl Fn(usize, &Identity) -> bool) -
         .collect();
     let mut known: Vec<Option<bool>> = vec![None; names.len()];
     while let Some((i, ids)) = pending.next().await {
-        known[i] = Some(ids.iter().any(|id| fits(i, id)));
+        known[i] = Some(ids.iter().any(&fits));
         for (j, k) in known.iter().enumerate() {
             match k {
                 Some(true) => return Some(j),
